@@ -138,6 +138,11 @@ def safe_export_annotations(
     provenance_output = Path(provenance_path).expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError("Candidate IDB not found: %s" % source)
+    paths = (source, annotations, provenance_output)
+    for index, path in enumerate(paths):
+        for other in paths[index + 1:]:
+            if path == other or (path.exists() and other.exists() and path.samefile(other)):
+                raise ValueError("Source IDB, annotations and provenance must be distinct files")
     if not overwrite and (annotations.exists() or provenance_output.exists()):
         raise FileExistsError(
             "Safe export output exists; select a new path or request overwrite"

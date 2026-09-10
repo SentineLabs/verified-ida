@@ -6,7 +6,8 @@
   prompts, machine contracts, four documentation pages, and a harmless example.
 - Retained full regression tests and research history outside the public tree.
 - Restored the standalone semantic-export entrypoint used by safe annotation
-  export; added early worker/launcher validation.
+  export; added early worker/launcher validation and rejection of output paths
+  that alias the source or each other.
 - Preserved the existing evidence, mutation, persistence, continuity and review
   contracts. No model-policy or SDK change.
 
