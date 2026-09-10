@@ -1,0 +1,6 @@
+# Critical model/tool dependencies validated for this source release.
+# Apply with pip install -c constraints.txt -e .
+openai-agents==0.20.0
+openai==2.54.0
+pydantic==2.13.5
+unicorn==2.1.4

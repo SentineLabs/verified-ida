@@ -1,0 +1,304 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelone.com/schemas/verified-ida/v1/operation.schema.json",
+  "title": "Verified IDA Operation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "operation_id",
+    "kind",
+    "artifact",
+    "target",
+    "desired",
+    "preconditions",
+    "evidence",
+    "depends_on",
+    "metadata"
+  ],
+  "properties": {
+    "schema": {"const": "verified_ida.operation.v1"},
+    "operation_id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "work_item_id": {"type": ["string", "null"], "maxLength": 160},
+    "kind": {
+      "enum": [
+        "function.rename",
+        "function.comment.set",
+        "address.comment.set",
+        "function.folder.set",
+        "function.prototype.set",
+        "local.rename",
+        "local.type.set",
+        "global.rename",
+        "global.type.set",
+        "named_type.create_or_update",
+        "relationship.annotate"
+      ]
+    },
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "target": {"$ref": "#/$defs/target"},
+    "desired": {"$ref": "#/$defs/desired"},
+    "preconditions": {"$ref": "#/$defs/preconditions"},
+    "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+    "depends_on": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 160},
+      "uniqueItems": true
+    },
+    "metadata": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "function.rename"}}},
+      "then": {
+        "properties": {
+          "target": {"$ref": "#/$defs/function_target"},
+          "desired": {"required": ["name"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "function.comment.set"}}},
+      "then": {
+        "properties": {
+          "target": {"$ref": "#/$defs/function_target"},
+          "desired": {"required": ["comment", "repeatable"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "address.comment.set"}}},
+      "then": {
+        "properties": {
+          "target": {"$ref": "#/$defs/address_target"},
+          "desired": {"required": ["comment", "repeatable"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "function.folder.set"}}},
+      "then": {
+        "properties": {
+          "target": {"$ref": "#/$defs/folder_target"},
+          "desired": {"required": ["folder"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "function.prototype.set"}}},
+      "then": {
+        "properties": {
+          "target": {"$ref": "#/$defs/function_target"},
+          "desired": {"required": ["declaration"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"enum": ["local.rename", "local.type.set"]}}},
+      "then": {"properties": {"target": {"$ref": "#/$defs/local_target"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "local.rename"}}},
+      "then": {"properties": {"desired": {"required": ["name"]}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "local.type.set"}}},
+      "then": {"properties": {"desired": {"required": ["declaration"]}}}
+    },
+    {
+      "if": {"properties": {"kind": {"enum": ["global.rename", "global.type.set"]}}},
+      "then": {"properties": {"target": {"$ref": "#/$defs/global_target"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "global.rename"}}},
+      "then": {"properties": {"desired": {"required": ["name"]}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "global.type.set"}}},
+      "then": {"properties": {"desired": {"required": ["declaration"]}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "named_type.create_or_update"}}},
+      "then": {
+        "properties": {
+          "target": {"$ref": "#/$defs/named_type_target"},
+          "desired": {"required": ["type_kind", "name", "declaration"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "relationship.annotate"}}},
+      "then": {
+        "properties": {
+          "target": {"$ref": "#/$defs/relationship_target"},
+          "desired": {"required": ["relationship_kind", "description"]}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "address": {
+      "oneOf": [
+        {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        {"type": "string", "pattern": "^(0[xX][0-9a-fA-F]+|[0-9]+)$"}
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binary_sha256", "database_id", "database_revision"],
+      "properties": {
+        "binary_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "database_id": {"type": "string", "minLength": 1},
+        "database_revision": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "integer"}
+          ]
+        },
+        "image_base": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]}
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["function", "address", "global", "local_variable", "named_type", "relationship", "folder_entry"]},
+        "address": {"$ref": "#/$defs/address"},
+        "function_address": {"$ref": "#/$defs/address"},
+        "source_address": {"$ref": "#/$defs/address"},
+        "destination_address": {"$ref": "#/$defs/address"},
+        "current_name": {"type": ["string", "null"]},
+        "name": {"type": ["string", "null"]},
+        "is_parameter": {"type": ["boolean", "null"]},
+        "lvar_index": {"type": ["integer", "null"], "minimum": 0},
+        "location": {"type": "object"},
+        "current_type": {"type": ["string", "null"]},
+        "use_site": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
+        "type_ordinal": {"type": ["integer", "null"], "minimum": 0},
+        "declaration_digest": {"type": ["string", "null"]},
+        "function_byte_hash": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "relationship_kind": {"type": ["string", "null"]},
+        "current_folder": {"type": ["string", "null"]}
+      }
+    },
+    "function_target": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {"properties": {"kind": {"const": "function"}}, "required": ["address"]}
+      ]
+    },
+    "address_target": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {"properties": {"kind": {"const": "address"}}, "required": ["address"]}
+      ]
+    },
+    "global_target": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {"properties": {"kind": {"const": "global"}}, "required": ["address"]}
+      ]
+    },
+    "folder_target": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {
+          "properties": {"kind": {"enum": ["function", "folder_entry"]}},
+          "anyOf": [{"required": ["address"]}, {"required": ["function_address"]}]
+        }
+      ]
+    },
+    "local_target": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {
+          "properties": {"kind": {"const": "local_variable"}},
+          "required": ["function_address"],
+          "anyOf": [
+            {"required": ["current_name"]},
+            {"required": ["lvar_index"]},
+            {"required": ["location"]},
+            {"required": ["use_site"]}
+          ]
+        }
+      ]
+    },
+    "named_type_target": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {"properties": {"kind": {"const": "named_type"}}, "required": ["name"]}
+      ]
+    },
+    "relationship_target": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {
+          "properties": {"kind": {"const": "relationship"}},
+          "required": ["source_address", "destination_address"]
+        }
+      ]
+    },
+    "desired": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "comment": {"type": "string", "minLength": 1},
+        "repeatable": {"type": "boolean"},
+        "folder": {"type": "string", "minLength": 1},
+        "declaration": {"type": "string", "minLength": 1},
+        "type_kind": {"enum": ["struct", "union", "enum", "typedef"]},
+        "relationship_kind": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "flow": {},
+        "ownership": {}
+      }
+    },
+    "preconditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "database_revision": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "integer"}
+          ]
+        },
+        "current_name": {"type": ["string", "null"]},
+        "name": {"type": ["string", "null"]},
+        "current_type": {"type": ["string", "null"]},
+        "type": {"type": ["string", "null"]},
+        "declaration": {"type": ["string", "null"]},
+        "comment_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "declaration_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "repeatable": {"type": "boolean"},
+        "folder": {"type": ["string", "null"]}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "event_index": {"type": ["integer", "null"], "minimum": 0},
+        "address": {"oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]},
+        "query_id": {"type": ["string", "null"]},
+        "digest": {"type": ["string", "null"]},
+        "note": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

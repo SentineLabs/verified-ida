@@ -1,0 +1,6 @@
+(version 1)
+
+; Allow normal local IDA behavior, but deny network operations for IDA and
+; child processes launched from this sandbox.
+(allow default)
+(deny network*)
