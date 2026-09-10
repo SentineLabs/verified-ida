@@ -35,4 +35,6 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    # IDAPython treats even SystemExit(0) as a script error. Normal return is
+    # successful; exceptions still fail the headless invocation.
+    main(sys.argv[1:])
