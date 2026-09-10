@@ -25,11 +25,33 @@ security, compaction, component and review boundary.
 
 ## Candidate-specific checks
 
-Release preparation validates the exact exported runtime against the private
-regression tests, audits its explicit inventory, installs an extracted archive,
-and exercises the repaired standalone annotation exporter with native IDA on
-Linux. It also runs the public example through real IDA. Final measured results
-will be inserted here before this candidate is handed off.
+The 0.2.0a11 exported runtime passed these checks:
+
+| Check | Result |
+| --- | --- |
+| Private regression checks bound to public production imports | 430 passed, zero failed, on local Python 3.12 and Linux Python 3.10 |
+| Full private preparation suite, including developer packaging checks | 440 passed, zero failed |
+| Public source inventory | 105 files; matched the curated source map and archive manifest; no broken local Markdown links |
+| Harmless public example on IDA Pro 9.3 | Rename, missing-comment feedback, corrective comment and persistence passed; clean input unchanged |
+| Standalone safe annotation export on IDA Pro 9.3 | Passed on the harmless fixture and a saved malware child IDB; source bytes and measured semantic state unchanged |
+| Repeat resume of a settled nine-finding review | IDBs, operations, notebook, decisions and recorded usage unchanged; zero new model requests |
+
+The ten checks omitted from the public-import run inspect developer-only test
+layout and packaging. They passed in the private preparation suite; they were
+not silently counted as public-runtime passes. Private fixtures and test code
+remain outside the distributed tree. The public runnable example uses only
+distributed source plus the documented external tools.
+
+The export-helper repair supplies its missing semantic-snapshot entrypoint,
+checks worker availability before launch, and rejects output paths that alias
+the source or each other. Native testing also caught IDAPython treating
+`SystemExit(0)` as a script error; the worker now returns normally. These changes
+were tested together, not only against a mocked executor.
+
+The settled review correctly remained analytically incomplete because external
+runtime-delivered modules were unavailable. Passing the repeat-resume check
+means preserving that honest outcome without duplicate work, not certifying the
+malware analysis as complete.
 
 No primary malware investigation or API access is needed to verify the small
 export-worker fix. Model instructions, investigation/review policy, and the SDK
