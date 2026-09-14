@@ -15,8 +15,8 @@ The input is loaded by IDA and is also passed as argv[1] to the script.
 
 Example:
   scripts/run_ida_script_no_network.sh sample.exe scripts/prepare_analysis.py \
-    --max 50 --save-as /path/to/output/sample.i64 \
-    --output /path/to/output/sample_order.json
+    --save-as /path/to/output/sample.i64 \
+    --output /path/to/output/preparation.json
 EOF
 }
 

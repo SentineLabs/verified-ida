@@ -51,7 +51,7 @@ def run_budgeted_review(
         if resume and not path.is_file():
             raise RuntimeError(
                 "Historical review has no aggregate budget ledger. Start a new "
-                "explicitly budgeted review/replay; do not silently reset usage."
+                "explicitly budgeted review; do not silently reset usage."
             )
         stored = json.loads(path.read_text())["limits"] if path.is_file() else DEFAULT_LIMITS
         limits = {}

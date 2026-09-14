@@ -16,7 +16,6 @@ ANALYSIS_FEEDBACK_SCHEMA = "verified_ida.analysis_feedback.v1"
 ANALYSIS_FEEDBACK_SCHEMA_V2 = "verified_ida.analysis_feedback.v2"
 ANALYSIS_ADVISORY_SCHEMA = "verified_ida.analysis_advisory.v1"
 ANALYSIS_FEEDBACK_PROFILES = ("none", "scoped")
-ANALYSIS_FEEDBACK_COMPATIBILITY_PROFILES = ("legacy_full",)
 DEFAULT_EXAMPLE_LIMIT = 4
 DEFAULT_ADVISORY_LIMIT = 12
 MAX_TEXT_LENGTH = 512
@@ -60,7 +59,8 @@ def _identifier_present(text: Any, name: str) -> bool:
 
     if not name:
         return False
-    token = r"[A-Za-z0-9_$?@]"
+    # A scoped C++ name is one identifier here: Owner::Nested is not Owner.
+    token = r"[A-Za-z0-9_$?@:]"
     return bool(re.search(
         r"(?<!%s)%s(?!%s)" % (token, re.escape(name), token),
         str(text or ""),
@@ -72,19 +72,18 @@ def _type_dependency_match(
     *,
     rendered_field: str,
     type_name: str,
-) -> tuple[bool, str]:
+) -> tuple[bool | None, str]:
     """Prefer tinfo_t traversal and retain exact lexical matching as fallback."""
 
     dependencies = row.get("type_dependencies")
     if isinstance(dependencies, list):
-        return (
-            type_name in {str(value) for value in dependencies},
-            "ida_tinfo_dependency",
-        )
-    return (
-        _identifier_present(row.get(rendered_field), type_name),
-        "exact_identifier_fallback",
-    )
+        if type_name in {str(value) for value in dependencies}:
+            return True, "ida_tinfo_dependency"
+        if (row.get("type_dependency_scan") or {}).get("complete") is True:
+            return False, "ida_tinfo_dependency"
+    if _identifier_present(row.get(rendered_field), type_name):
+        return True, "exact_identifier_fallback"
+    return None, "unavailable_or_incomplete"
 
 
 def compact_propagation(
@@ -320,26 +319,39 @@ def measure_type_application(
 
     cap = max(0, int(limit))
     measurement_methods: dict[str, int] = {}
+    incomplete_rows = 0
+    lexical_candidates = []
 
     def matched(
         row: Mapping[str, Any],
         *,
         rendered_field: str,
+        surface: str,
     ) -> bool:
+        nonlocal incomplete_rows
         present, method = _type_dependency_match(
             row,
             rendered_field=rendered_field,
             type_name=type_name,
         )
+        if (row.get("type_dependency_scan") or {}).get("complete") is not True:
+            incomplete_rows += 1
         if present:
             measurement_methods[method] = measurement_methods.get(method, 0) + 1
-        return present
+            if method == "exact_identifier_fallback":
+                lexical_candidates.append({
+                    "surface": surface,
+                    "address": row.get("address"),
+                    "name": row.get("name"),
+                    "declaration": _bounded_text(row.get(rendered_field)),
+                })
+        return present is True and method == "ida_tinfo_dependency"
 
     functions = []
     for raw in state.get("functions") or []:
         row = dict(raw) if isinstance(raw, Mapping) else {}
         prototype = str(row.get("prototype") or "")
-        if matched(row, rendered_field="prototype"):
+        if matched(row, rendered_field="prototype", surface="function_prototypes"):
             functions.append({
                 "target": "%s::%s" % (component_id, row.get("address")),
                 "name": row.get("name"),
@@ -350,7 +362,7 @@ def measure_type_application(
     for raw in state.get("globals") or []:
         row = dict(raw) if isinstance(raw, Mapping) else {}
         declaration = str(row.get("declaration") or "")
-        if matched(row, rendered_field="declaration"):
+        if matched(row, rendered_field="declaration", surface="globals"):
             globals_.append({
                 "target": "%s::%s" % (component_id, row.get("address")),
                 "name": row.get("name"),
@@ -363,7 +375,7 @@ def measure_type_application(
         for raw_member in owner.get("members") or []:
             member = dict(raw_member) if isinstance(raw_member, Mapping) else {}
             member_type = str(member.get("type") or "")
-            if matched(member, rendered_field="type"):
+            if matched(member, rendered_field="type", surface="structure_members"):
                 member_uses.append({
                     "owner": owner.get("name"),
                     "member": member.get("name"),
@@ -377,7 +389,7 @@ def measure_type_application(
         if row.get("name") == type_name:
             continue
         declaration = str(row.get("declaration") or "")
-        if matched(row, rendered_field="declaration"):
+        if matched(row, rendered_field="declaration", surface="named_type_declarations"):
             declaration_uses.append({
                 "name": row.get("name"),
                 "kind": row.get("kind"),
@@ -395,7 +407,7 @@ def measure_type_application(
         for raw_local in local_state.get("items") or []:
             local = dict(raw_local) if isinstance(raw_local, Mapping) else {}
             declaration = str(local.get("declaration") or "")
-            if matched(local, rendered_field="declaration"):
+            if matched(local, rendered_field="declaration", surface="selected_locals"):
                 locals_.append({
                     "target": "%s::%s" % (component_id, function.get("address")),
                     "index": local.get("index"),
@@ -418,9 +430,19 @@ def measure_type_application(
         "revision": int(revision),
         "status": (
             "applied_on_measured_surfaces" if total
+            else "measurement_incomplete" if incomplete_rows
             else "declaration_only_currently"
         ),
         "measured_use_count": total,
+        "lexical_candidates": {
+            "count": len(lexical_candidates),
+            "examples": lexical_candidates[:cap],
+            "examples_truncated": len(lexical_candidates) > cap,
+            "included_in_measured_use_count": False,
+        },
+        "measurement_complete": incomplete_rows == 0,
+        "incomplete_row_count": incomplete_rows,
+        "count_is_lower_bound": incomplete_rows > 0,
         "measurement_provenance": {
             "native_tinfo_dependency_count": measurement_methods.get(
                 "ida_tinfo_dependency", 0
@@ -450,7 +472,8 @@ def measure_type_application(
             "arbitrary_stack_locals": "not_measured",
         },
         "interpretation": (
-            "Zero measured uses is a current artifact fact, not an edit failure. "
+            "Counts describe only the measured surfaces. An incomplete scan cannot "
+            "establish absence; lexical matches are candidates, not measured uses. "
             "If this type was intended to clarify the program, inspect and apply it "
             "at evidence-supported sites; declaration-only state can also be intentional."
         ),
@@ -539,7 +562,7 @@ def build_analysis_feedback(
 ) -> dict[str, Any] | None:
     if profile == "none":
         return None
-    if profile not in {"legacy_full", "scoped"}:
+    if profile != "scoped":
         raise ValueError("Unsupported analysis feedback profile: %s" % profile)
     feedback: dict[str, Any] = {
         "schema": analysis_feedback_schema(profile),
@@ -549,14 +572,10 @@ def build_analysis_feedback(
         "component_id": component_id,
         "revision": int(revision),
     }
-    propagation = (
-        compact_selective_propagation(
-            receipt,
-            operation=operation,
-            component_id=component_id,
-        )
-        if profile == "scoped"
-        else compact_propagation(receipt, component_id=component_id)
+    propagation = compact_selective_propagation(
+        receipt,
+        operation=operation,
+        component_id=component_id,
     )
     if propagation is not None:
         feedback["propagation"] = propagation

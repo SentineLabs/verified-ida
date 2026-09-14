@@ -106,8 +106,11 @@ def emulate_x86(payload: dict[str, Any], code: bytes) -> dict[str, Any]:
 
     trace: list[str] = []
     invalid_memory: list[dict[str, Any]] = []
+    instruction_count = 0
 
     def on_code(_uc: Any, address: int, _size: int, _user: Any) -> None:
+        nonlocal instruction_count
+        instruction_count += 1
         if len(trace) < 4096:
             trace.append(hex(address))
 
@@ -137,11 +140,16 @@ def emulate_x86(payload: dict[str, Any], code: bytes) -> dict[str, Any]:
 
     uc.hook_add(UC_HOOK_CODE, on_code)
     uc.hook_add(UC_HOOK_MEM_INVALID, on_invalid)
-    stopped = "completed"
+    stopped = "stopped_before_end"
     error = None
     end = _parse_int(payload.get("end", base + len(code)))
     try:
         uc.emu_start(start, end, count=instruction_limit)
+        instruction_pointer = uc.reg_read(register_map["rip" if mode_name == "x86_64" else "eip"])
+        if instruction_pointer == end:
+            stopped = "completed"
+        elif instruction_count >= instruction_limit:
+            stopped = "instruction_limit"
     except Exception as exc:
         stopped = "emulation_error"
         error = "%s: %s" % (type(exc).__name__, exc)
@@ -174,12 +182,14 @@ def emulate_x86(payload: dict[str, Any], code: bytes) -> dict[str, Any]:
         "start": hex(start),
         "end": hex(end),
         "instruction_limit": instruction_limit,
-        "executed_instruction_count": len(trace),
+        "executed_instruction_count": instruction_count,
+        "instruction_count_scope": "instructions entered; a faulting instruction may be included",
         "trace": trace,
-        "trace_truncated": len(trace) >= 4096,
+        "trace_truncated": instruction_count > len(trace),
         "registers": registers,
         "invalid_memory": invalid_memory,
         "readback": readback,
+        "readback_complete": stopped == "completed",
         "stopped": stopped,
         "error": error,
     }

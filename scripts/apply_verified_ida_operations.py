@@ -552,7 +552,7 @@ def _print_named_type(name):
     if not loaded:
         return ""
     flags = 0
-    for flag_name in ("PRTYPE_MULTI", "PRTYPE_TYPE", "PRTYPE_SEMI"):
+    for flag_name in ("PRTYPE_MULTI", "PRTYPE_TYPE", "PRTYPE_SEMI", "PRTYPE_DEF"):
         flags |= int(getattr(ida_typeinf, flag_name, 0) or 0)
     printer = getattr(ida_typeinf, "print_tinfo", None)
     if callable(printer):
@@ -609,7 +609,7 @@ def _parse_declaration_tinfo(declaration):
         except Exception:
             pass
     try:
-        parsed = type_adapter._parse_lvar_type_tinfo(text)
+        parsed = type_adapter._parse_lvar_type(text)
         if parsed is not None and not parsed.empty():
             return parsed
     except Exception:

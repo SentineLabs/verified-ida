@@ -45,3 +45,15 @@ cross-component boundary, list the exact source and destination as separate
 function, address, or global targets in their respective components and explain
 the boundary in the finding; do not encode `component::address` in an address
 field.
+
+When resolving a gap requires recovering and analyzing embedded content,
+include a `component_recovery` target: its parent `component_id`, exact mapped
+`address`, byte `size`, and `analysis_objective`. Establish the range from live
+evidence. State the analytical question without assuming the result needs a
+child IDB: recovered data can remain parent-owned; executable analysis can use
+a child IDB. Keep uncertain ranges as investigation questions until bounded;
+do not invent extraction sizes or place required recovery only in prose.
+
+An indirect relationship may remain an unresolved relationship target. Do not
+invent a direct callsite for a vtable or callback. Include the exact endpoint
+functions so application can document what the evidence actually establishes.

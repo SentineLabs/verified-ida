@@ -139,10 +139,16 @@ def _parameters(function: Mapping[str, Any]) -> list[dict[str, Any]]:
 def _user_name_state(value: Mapping[str, Any]) -> bool | None:
     """Return backend name provenance without inferring it from spelling."""
 
+    if value.get("name_from_user_prototype") is True:
+        return True
+    if (value.get("has_user_name") is False
+            and "name_from_user_prototype" in value
+            and value["name_from_user_prototype"] is None):
+        return None
     if value.get("has_user_name") is not None:
         return bool(value.get("has_user_name"))
     provenance = _text(value.get("name_provenance")).lower()
-    if provenance == "user":
+    if provenance in {"user", "user_prototype"}:
         return True
     if provenance in {"not_user_supplied", "auto", "generated"}:
         return False
@@ -265,8 +271,9 @@ def post_edit_candidates(
     operation_kind = str(operation.get("kind") or "")
     operation_id = str(operation.get("operation_id") or "")
     target_kind = str(target.get("kind") or "")
-    if _probably_low_value(function) and target_kind not in {"named_type", "relationship"}:
-        return {"candidates": [], "evaluated_gap_kinds": [], "closure_target": None}
+    # Discovery ranking must never suppress checks on an explicitly edited
+    # artifact. Small functions and library-looking names still need readback
+    # and operation-specific closure.
     address = _address(
         function.get("address")
         or function.get("start")
@@ -420,21 +427,16 @@ def post_edit_candidates(
             evaluated_without_gap("conflicting_function_comment_slots")
 
     parameters = _parameters(function)
-    default_name_rows = [
-        row for row in parameters
-        if GENERIC_LOCAL_RE.match(
-            _text(row.get("name") or row.get("current_name"))
-        )
-    ]
     native_default_names = [
         _text(row.get("name") or row.get("current_name"))
-        for row in default_name_rows
+        for row in parameters
         if _user_name_state(row) is False
     ]
     heuristic_default_names = [
         _text(row.get("name") or row.get("current_name"))
-        for row in default_name_rows
+        for row in parameters
         if _user_name_state(row) is None
+        and GENERIC_LOCAL_RE.match(_text(row.get("name") or row.get("current_name")))
     ]
 
     def heuristic_name_suggestion(gap_kind: str, reason: str) -> None:
@@ -506,7 +508,7 @@ def post_edit_candidates(
             or (edited_parameter or {}).get("current_name")
         )
         user_name_state = _user_name_state(edited_parameter or target)
-        if GENERIC_LOCAL_RE.match(parameter_name) and user_name_state is False:
+        if user_name_state is False:
             closure(
                 "typed_parameter_generic_name",
                 "typed parameter still has backend-confirmed non-user name %s"

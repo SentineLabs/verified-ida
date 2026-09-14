@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any
 
 
+MAX_RESOURCE_DEPTH = 5
+MAX_RESOURCE_DIRECTORY_ENTRIES = 200
+MAX_RESOURCE_ITEMS = 200
+MAX_RESOURCE_WORK = 10_000
+
+
 RESOURCE_TYPES = {
     1: "cursor",
     2: "bitmap",
@@ -84,21 +90,44 @@ def _rva_to_offset(rva: int, sections: list[dict[str, Any]]) -> int | None:
 def _parse_resource_dir(data: bytes, base_off: int, rva: int, sections: list[dict[str, Any]]) -> dict[str, Any]:
     root_off = _rva_to_offset(rva, sections)
     if root_off is None or root_off + 16 > len(data):
-        return {"present": False, "error": "resource directory not mapped"}
+        return {"present": False, "error": "resource directory not mapped",
+                "scan": {"complete": False, "reasons": ["unmapped_directory"]}}
     items = []
     type_counts: dict[str, int] = {}
+    issues: set[str] = set()
+    entries_scanned = 0
+    directory_visits = 0
 
-    def walk(dir_off: int, level: int, path: list[str]) -> None:
-        if level > 5 or len(items) >= 200 or dir_off + 16 > len(data):
+    def walk(dir_off: int, level: int, path: list[str], ancestors: frozenset[int]) -> None:
+        nonlocal entries_scanned, directory_visits
+        if dir_off in ancestors:
+            issues.add("directory_cycle")
             return
+        if level > MAX_RESOURCE_DEPTH:
+            issues.add("depth_limit")
+            return
+        if dir_off < 0 or dir_off + 16 > len(data):
+            issues.add("truncated_directory")
+            return
+        directory_visits += 1
         named = _u16(data, dir_off + 12)
         ids = _u16(data, dir_off + 14)
-        count = min(named + ids, 200)
+        count = min(named + ids, MAX_RESOURCE_DIRECTORY_ENTRIES)
+        if count < named + ids:
+            issues.add("directory_entry_limit")
         entry_off = dir_off + 16
         for index in range(count):
+            if entries_scanned >= MAX_RESOURCE_WORK:
+                issues.add("work_limit")
+                return
+            if len(items) >= MAX_RESOURCE_ITEMS:
+                issues.add("item_limit")
+                return
             off = entry_off + index * 8
             if off + 8 > len(data):
+                issues.add("truncated_directory_entry")
                 break
+            entries_scanned += 1
             name_raw = _u32(data, off)
             value_raw = _u32(data, off + 4)
             if name_raw & 0x80000000:
@@ -108,10 +137,14 @@ def _parse_resource_dir(data: bytes, base_off: int, rva: int, sections: list[dic
                 name = RESOURCE_TYPES.get(name_id, str(name_id)) if level == 0 else str(name_id)
             next_path = path + [name]
             if value_raw & 0x80000000:
-                walk(root_off + (value_raw & 0x7FFFFFFF), level + 1, next_path)
+                # Path-local identity detects cycles while retaining distinct
+                # resource paths through a legitimately shared directory.
+                walk(root_off + (value_raw & 0x7FFFFFFF), level + 1,
+                     next_path, ancestors | {dir_off})
             else:
                 data_entry = root_off + value_raw
                 if data_entry + 16 > len(data):
+                    issues.add("truncated_data_entry")
                     continue
                 data_rva = _u32(data, data_entry)
                 size = _u32(data, data_entry + 4)
@@ -125,12 +158,22 @@ def _parse_resource_dir(data: bytes, base_off: int, rva: int, sections: list[dic
                 items.append(item)
                 type_counts[item["type"]] = type_counts.get(item["type"], 0) + 1
 
-    walk(root_off, 0, [])
+    walk(root_off, 0, [], frozenset())
     return {
         "present": True,
         "rva": hex(rva),
         "file_offset": hex(root_off),
         "count": len(items),
+        "count_relation": "lower_bound" if issues else "exact",
+        "returned": min(80, len(items)),
+        "items_truncated": len(items) > 80,
+        "scan": {
+            "complete": not issues,
+            "reasons": sorted(issues),
+            "entries_scanned": entries_scanned,
+            "directory_visits": directory_visits,
+            "work_limit": MAX_RESOURCE_WORK,
+        },
         "type_counts": dict(sorted(type_counts.items())),
         "items": items[:80],
     }

@@ -1,0 +1,436 @@
+{
+  "description": "Recorded ComRAT example: declaring a recovered type, observing zero measured uses, applying it to a function parameter, and verifying persistence.",
+  "excerpt_policy": "Selected tool-result records and fields. Original values are retained. The before/after items arrays contain the complete recorded decompilations of the example function; unrelated result fields are omitted. trace_line records the original JSONL line number.",
+  "source": {
+    "run_id": "verified_ida_public_a11_bounded_comrat_20260910_r1",
+    "model": "gpt-5.6-sol",
+    "harness_commit": "8483fe47b23f4bc026e519405e2350c23da3cf8d",
+    "trace_file": "observable_tool_trace.jsonl",
+    "trace_sha256": "01e0b09f108b7668f18e94ffbf2e586b607efe139300b1d3b883e7d887fcb2b5",
+    "binary_sha256": "303f2983b32519d32b3a408a08fe108b96657ff25c5500602f836689d8ad9731",
+    "component": "root",
+    "function_address": "0x18002c770"
+  },
+  "records": [
+    {
+      "trace_line": 34,
+      "event_index": 34,
+      "timestamp": "2026-09-10T02:12:49.967419Z",
+      "tool": "read_ida_function_code",
+      "arguments": {
+        "function_ref": "ref-23db6b3eefa067e53ee9eafe",
+        "limit": 300,
+        "representation": "pseudocode"
+      },
+      "result": {
+        "artifact": {
+          "binary_sha256": "303f2983b32519d32b3a408a08fe108b96657ff25c5500602f836689d8ad9731",
+          "database_id": "root",
+          "database_revision": 0
+        },
+        "evidence_id": "evidence-30107b5694aa7e3679427ece",
+        "function": {
+          "comment": "",
+          "comments": {
+            "nonrepeatable": "",
+            "repeatable": ""
+          },
+          "end": "0x18002c8fa",
+          "function_byte_hash": "656b2b3f4d22b30e9052b497cbc723459bbb13ab1c280ea6c9a28b4d3721c3c0",
+          "has_auto_name": false,
+          "has_dummy_name": true,
+          "has_user_name": false,
+          "name": "sub_18002C770",
+          "name_provenance": "dummy",
+          "prototype": "bool __fastcall(__int64)",
+          "size": 394,
+          "start": "0x18002c770"
+        },
+        "items": [
+          "bool __fastcall sub_18002C770(__int64 a1)",
+          "{",
+          "  __int64 *v2; // rax",
+          "  __int64 *v3; // rdi",
+          "  const WCHAR *v4; // rcx",
+          "  HANDLE *v5; // rdi",
+          "  __int64 *v6; // rbx",
+          "  DWORD LastError; // eax",
+          "  __int64 v8; // rcx",
+          "  bool result; // al",
+          "  void *Src[6]; // [rsp+50h] [rbp-A8h] BYREF",
+          "  struct _STARTUPINFOW StartupInfo; // [rsp+80h] [rbp-78h] BYREF",
+          "  DWORD v12; // [rsp+100h] [rbp+8h] BYREF",
+          "",
+          "  Src[4] = (void *)-2LL;",
+          "  try",
+          "  {",
+          "    v2 = (__int64 *)sub_180006790(*(_QWORD *)a1, -1455498770);",
+          "    sub_180006A30(v2);",
+          "    memset(&StartupInfo.lpReserved, 0, 0x60u);",
+          "    StartupInfo.cb = 104;",
+          "    StartupInfo.dwFlags = 257;",
+          "    StartupInfo.wShowWindow = 0;",
+          "    v3 = (__int64 *)sub_180006790(*(_QWORD *)a1, -1856471748);",
+          "    if ( v3[7] )",
+          "    {",
+          "      Src[3] = (void *)7;",
+          "      Src[2] = nullptr;",
+          "      LOWORD(Src[0]) = 0;",
+          "      sub_180008170(Src, (_QWORD *)(a1 + 8), 0, 0xFFFFFFFFFFFFFFFFuLL);",
+          "      sub_18000C4B0(v3[7], Src);",
+          "    }",
+          "    sub_180006A30(v3);",
+          "    v4 = (const WCHAR *)(a1 + 8);",
+          "    if ( *(_QWORD *)(a1 + 32) >= 8u )",
+          "      v4 = *(const WCHAR **)v4;",
+          "    v5 = (HANDLE *)(a1 + 48);",
+          "    if ( CreateProcessW(",
+          "           v4,",
+          "           nullptr,",
+          "           nullptr,",
+          "           nullptr,",
+          "           0,",
+          "           4u,",
+          "           nullptr,",
+          "           nullptr,",
+          "           &StartupInfo,",
+          "           (LPPROCESS_INFORMATION)(a1 + 48)) )",
+          "    {",
+          "      result = *v5 && WaitForSingleObject(*v5, 0xAu) == 258;",
+          "    }",
+          "    else",
+          "    {",
+          "      v6 = (__int64 *)sub_180006790(*(_QWORD *)a1, 117373433);",
+          "      LastError = GetLastError();",
+          "      v8 = v6[7];",
+          "      if ( v8 )",
+          "      {",
+          "        v12 = LastError;",
+          "        sub_18000BB40(v8, 3u, (__int64)&v12, 4);",
+          "      }",
+          "      sub_180006A30(v6);",
+          "      result = 0;",
+          "    }",
+          "  }",
+          "  catch ( ... )",
+          "  {",
+          "    return 0;",
+          "  }",
+          "  return result;",
+          "}"
+        ]
+      }
+    },
+    {
+      "trace_line": 158,
+      "event_index": 158,
+      "timestamp": "2026-09-10T02:15:29.096509Z",
+      "tool": "edit_ida",
+      "arguments": {
+        "evidence_refs": [
+          "evidence-eaa0f4b86fb113e0dc63bcbf",
+          "evidence-4f2f8a7365600cef1fe664f8",
+          "evidence-d02e684990b4217254f87bda",
+          "evidence-de1be7ff2d873d6bc2c718c6",
+          "evidence-61895dffc027167778e2ae2c"
+        ],
+        "kind": "named_type.create_or_update",
+        "reason": "Both task roots use one shared 0x50-byte context layout: an opaque diagnostic object at +0, an MSVC-style wide-string storage/length/capacity at +8/+0x18/+0x20, an as-yet-unresolved qword at +0x28, PROCESS_INFORMATION at +0x30, and a completion-event handle at +0x48. The constructor zeroes the three PROCESS_INFORMATION qwords and event slot, and the supporting routine stores CreateEventW at +0x48.",
+        "target_ref": "ref-0f4758e394196c60d30f2d01",
+        "value": {
+          "declaration": "struct SuspendedProcessContext\n{\n  void *diagnostic_context;\n  union\n  {\n    WCHAR inline_image_path[8];\n    WCHAR *heap_image_path;\n  } image_path_storage;\n  unsigned __int64 image_path_length;\n  unsigned __int64 image_path_capacity;\n  unsigned __int64 unknown_28;\n  struct _PROCESS_INFORMATION process_info;\n  HANDLE completion_event;\n};",
+          "type_kind": "struct"
+        }
+      },
+      "result": {
+        "evidence_id": "evidence-8db985505445c5c3be6299b4",
+        "current": {
+          "member_count": 7,
+          "name": "SuspendedProcessContext",
+          "signature_sha256": "6c1f4dae0a29a2a093de6de1823d3359d8ff114bc08f812a85d5cd60cb403be3",
+          "size": 80,
+          "type_kind": "struct"
+        },
+        "kind": "named_type.create_or_update",
+        "status": "verified",
+        "persistence": "verified",
+        "operation_id": "operation-17186fcd5d244ab2bb1b0c8c6f0b3ef0",
+        "checkpoint": {
+          "checkpoint_id": "checkpoint-e9c126ff44cabf35b1e984fd",
+          "component_id": "root",
+          "revision": 1,
+          "semantic_digest": "872920fd70bd4fa07f266d5760d976696623820d4aa10eeca40b900ac2d60704",
+          "status": "verified"
+        },
+        "analysis_feedback": {
+          "type_application": {
+            "measurement_status": "measured",
+            "types": [
+              {
+                "type_name": "SuspendedProcessContext",
+                "status": "declaration_only_currently",
+                "measured_use_count": 0,
+                "coverage": {
+                  "arbitrary_stack_locals": "not_measured",
+                  "function_prototypes": "complete_for_exported_idb_functions",
+                  "globals": "complete_for_exported_named_or_typed_globals",
+                  "named_type_declarations": "complete_for_exported_named_types",
+                  "operands_and_casts": "not_measured",
+                  "selected_locals": "selected_edited_functions_only:0",
+                  "structure_members": "complete_for_exported_named_structures"
+                },
+                "surfaces": {
+                  "function_prototypes": {
+                    "count": 0,
+                    "examples": [],
+                    "examples_truncated": false
+                  },
+                  "globals": {
+                    "count": 0,
+                    "examples": [],
+                    "examples_truncated": false
+                  },
+                  "named_type_declarations": {
+                    "count": 0,
+                    "examples": [],
+                    "examples_truncated": false
+                  },
+                  "selected_locals": {
+                    "count": 0,
+                    "examples": [],
+                    "examples_truncated": false
+                  },
+                  "structure_members": {
+                    "count": 0,
+                    "examples": [],
+                    "examples_truncated": false
+                  }
+                },
+                "interpretation": "Zero measured uses is a current artifact fact, not an edit failure. If this type was intended to clarify the program, inspect and apply it at evidence-supported sites; declaration-only state can also be intentional."
+              }
+            ]
+          }
+        },
+        "must_review": []
+      }
+    },
+    {
+      "trace_line": 162,
+      "event_index": 162,
+      "timestamp": "2026-09-10T02:15:31.742893Z",
+      "tool": "inspect_ida_function",
+      "arguments": {
+        "address": "0x18002c770"
+      },
+      "result": {
+        "artifact": {
+          "binary_sha256": "303f2983b32519d32b3a408a08fe108b96657ff25c5500602f836689d8ad9731",
+          "database_id": "root",
+          "database_revision": 1
+        },
+        "evidence_id": "evidence-d6e8a02f8971d160e679a1c5"
+      }
+    },
+    {
+      "trace_line": 170,
+      "event_index": 170,
+      "timestamp": "2026-09-10T02:15:46.303313Z",
+      "tool": "edit_ida",
+      "arguments": {
+        "evidence_refs": [
+          "evidence-d6e8a02f8971d160e679a1c5",
+          "evidence-8db985505445c5c3be6299b4"
+        ],
+        "kind": "function.prototype.set",
+        "reason": "The function reads the context's diagnostic object and wide application path, supplies &ctx->process_info to CreateProcessW with CREATE_SUSPENDED, and returns a one-byte Boolean result.",
+        "target_ref": "ref-8639d55a414928e92ea836c1",
+        "value": {
+          "declaration": "bool __fastcall create_suspended_target_process(struct SuspendedProcessContext *ctx);"
+        }
+      },
+      "result": {
+        "evidence_id": "evidence-d4f2893fe87aa6d9b65e9177",
+        "current": {
+          "declaration": "bool __fastcall(struct SuspendedProcessContext *ctx)",
+          "name": "sub_18002C770"
+        },
+        "kind": "function.prototype.set",
+        "status": "verified",
+        "persistence": "verified",
+        "operation_id": "operation-64c7ceb6ca1640ee988f38197d568bf5",
+        "checkpoint": {
+          "checkpoint_id": "checkpoint-1ff4bb331d2adca9889654b7",
+          "component_id": "root",
+          "revision": 2,
+          "semantic_digest": "916fd5efeaa2256a9842d1a6536c0db325bbd9df6c751fb3e30b3a1fe3ae478a",
+          "status": "verified"
+        },
+        "analysis_feedback": {
+          "type_application": {
+            "measurement_status": "measured",
+            "types": [
+              {
+                "type_name": "SuspendedProcessContext",
+                "status": "applied_on_measured_surfaces",
+                "measured_use_count": 1,
+                "coverage": {
+                  "arbitrary_stack_locals": "not_measured",
+                  "function_prototypes": "complete_for_exported_idb_functions",
+                  "globals": "complete_for_exported_named_or_typed_globals",
+                  "named_type_declarations": "complete_for_exported_named_types",
+                  "operands_and_casts": "not_measured",
+                  "selected_locals": "selected_edited_functions_only:0",
+                  "structure_members": "complete_for_exported_named_structures"
+                },
+                "surfaces": {
+                  "function_prototypes": {
+                    "count": 1,
+                    "examples": [
+                      {
+                        "name": "sub_18002C770",
+                        "prototype": "bool __fastcall(struct SuspendedProcessContext*ctx)",
+                        "target": "root::0x18002c770"
+                      }
+                    ],
+                    "examples_truncated": false
+                  },
+                  "globals": {
+                    "count": 0,
+                    "examples": [],
+                    "examples_truncated": false
+                  },
+                  "named_type_declarations": {
+                    "count": 0,
+                    "examples": [],
+                    "examples_truncated": false
+                  },
+                  "selected_locals": {
+                    "count": 0,
+                    "examples": [],
+                    "examples_truncated": false
+                  },
+                  "structure_members": {
+                    "count": 0,
+                    "examples": [],
+                    "examples_truncated": false
+                  }
+                },
+                "interpretation": "Zero measured uses is a current artifact fact, not an edit failure. If this type was intended to clarify the program, inspect and apply it at evidence-supported sites; declaration-only state can also be intentional."
+              }
+            ]
+          }
+        },
+        "must_review": []
+      }
+    },
+    {
+      "trace_line": 174,
+      "event_index": 174,
+      "timestamp": "2026-09-10T02:15:50.176495Z",
+      "tool": "read_ida_function_code",
+      "arguments": {
+        "function_ref": "ref-aecc9fcb9ae8d136bdd0533e",
+        "limit": 120,
+        "representation": "pseudocode"
+      },
+      "result": {
+        "artifact": {
+          "binary_sha256": "303f2983b32519d32b3a408a08fe108b96657ff25c5500602f836689d8ad9731",
+          "database_id": "root",
+          "database_revision": 2
+        },
+        "evidence_id": "evidence-f0531ba68b8caaf38ea91f4e",
+        "function": {
+          "comment": "",
+          "comments": {
+            "nonrepeatable": "",
+            "repeatable": ""
+          },
+          "end": "0x18002c8fa",
+          "function_byte_hash": "656b2b3f4d22b30e9052b497cbc723459bbb13ab1c280ea6c9a28b4d3721c3c0",
+          "has_auto_name": false,
+          "has_dummy_name": true,
+          "has_user_name": false,
+          "name": "sub_18002C770",
+          "name_provenance": "dummy",
+          "prototype": "bool __fastcall(struct SuspendedProcessContext *ctx)",
+          "size": 394,
+          "start": "0x18002c770"
+        },
+        "items": [
+          "bool __fastcall sub_18002C770(struct SuspendedProcessContext *ctx)",
+          "{",
+          "  __int64 *v2; // rax",
+          "  __int64 *v3; // rdi",
+          "  union SuspendedProcessContext::$4EEC61FF754B335202D265239C27BE43 *p_image_path_storage; // rcx",
+          "  struct _PROCESS_INFORMATION *p_process_info; // rdi",
+          "  __int64 *v6; // rbx",
+          "  DWORD LastError; // eax",
+          "  __int64 v8; // rcx",
+          "  bool result; // al",
+          "  void *Src[6]; // [rsp+50h] [rbp-A8h] BYREF",
+          "  struct _STARTUPINFOW StartupInfo; // [rsp+80h] [rbp-78h] BYREF",
+          "  DWORD v12; // [rsp+100h] [rbp+8h] BYREF",
+          "",
+          "  Src[4] = (void *)-2LL;",
+          "  try",
+          "  {",
+          "    v2 = (__int64 *)sub_180006790((__int64)ctx->diagnostic_context, -1455498770);",
+          "    sub_180006A30(v2);",
+          "    memset(&StartupInfo.lpReserved, 0, 0x60u);",
+          "    StartupInfo.cb = 104;",
+          "    StartupInfo.dwFlags = 257;",
+          "    StartupInfo.wShowWindow = 0;",
+          "    v3 = (__int64 *)sub_180006790((__int64)ctx->diagnostic_context, -1856471748);",
+          "    if ( v3[7] )",
+          "    {",
+          "      Src[3] = (void *)7;",
+          "      Src[2] = nullptr;",
+          "      LOWORD(Src[0]) = 0;",
+          "      sub_180008170(Src, &ctx->image_path_storage.heap_image_path, 0, 0xFFFFFFFFFFFFFFFFuLL);",
+          "      sub_18000C4B0(v3[7], Src);",
+          "    }",
+          "    sub_180006A30(v3);",
+          "    p_image_path_storage = &ctx->image_path_storage;",
+          "    if ( ctx->image_path_capacity >= 8 )",
+          "      p_image_path_storage = (union SuspendedProcessContext::$4EEC61FF754B335202D265239C27BE43 *)p_image_path_storage->heap_image_path;",
+          "    p_process_info = &ctx->process_info;",
+          "    if ( CreateProcessW(",
+          "           p_image_path_storage->inline_image_path,",
+          "           nullptr,",
+          "           nullptr,",
+          "           nullptr,",
+          "           0,",
+          "           4u,",
+          "           nullptr,",
+          "           nullptr,",
+          "           &StartupInfo,",
+          "           &ctx->process_info) )",
+          "    {",
+          "      result = p_process_info->hProcess && WaitForSingleObject(p_process_info->hProcess, 0xAu) == 258;",
+          "    }",
+          "    else",
+          "    {",
+          "      v6 = (__int64 *)sub_180006790((__int64)ctx->diagnostic_context, 117373433);",
+          "      LastError = GetLastError();",
+          "      v8 = v6[7];",
+          "      if ( v8 )",
+          "      {",
+          "        v12 = LastError;",
+          "        sub_18000BB40(v8, 3u, (__int64)&v12, 4);",
+          "      }",
+          "      sub_180006A30(v6);",
+          "      result = 0;",
+          "    }",
+          "  }",
+          "  catch ( ... )",
+          "  {",
+          "    return 0;",
+          "  }",
+          "  return result;",
+          "}"
+        ]
+      }
+    }
+  ]
+}

@@ -1,22 +1,18 @@
-# A verified name is not yet an explained function
+# Check your installation
 
-This is a small executable example of the **host contract**, not a model run.
-It uses the included harmless C source and real IDA. No API key or malware is
-needed, and the compiled program is never executed. It requires the supported
-Linux/IDA environment and a C compiler.
+This optional check tests the edit-feedback loop with real IDA and a scripted
+driver. It needs the
+[supported Linux/IDA environment](../../docs/usage.md#requirements-and-installation)
+and a C compiler. No model or API key is required. The harmless test program is
+compiled for inspection and never executed. For a model-led example, read
+[Applying a recovered type](../../docs/worked-example.md).
 
-The function caps an unsigned value at 512. The example:
+`specimen_clamp` caps an unsigned value at 512. The driver:
 
-1. inspects it and applies `ClampRequestedSize` through the runtime;
-2. receives a verified rename plus a missing-behavior-comment work item;
-3. inspects the new revision and adds the explanation;
-4. checks that the missing-comment item is resolved; and
-5. verifies persistence in a fresh IDA process while preserving the clean IDB.
-
-The Python driver chooses the actions deterministically. In an investigation,
-the model receives these results through its tools and chooses what to inspect
-or correct. This example proves the feedback and persistence path, not that a
-model necessarily chooses the right action.
+1. Inspects the function and renames it to `ClampRequestedSize`.
+2. Receives a verified rename and a missing-behavior-comment item.
+3. Inspects the new revision and adds the explanation.
+4. Checks that the item closed, then reopens IDA to verify persistence.
 
 ## Run from the repository root
 
@@ -36,8 +32,7 @@ scripts/run_ida_script_no_network.sh \
 nm -n /analysis/verified-edit-demo/specimen
 ```
 
-Find `specimen_clamp` in the `nm` output, then pass its actual address with a
-`0x` prefix. Do not copy an address from another compiler's build:
+Find `specimen_clamp` in the `nm` output and supply its address:
 
 ```sh
 python examples/verified-edit/demonstrate.py \
@@ -47,12 +42,13 @@ python examples/verified-edit/demonstrate.py \
   --project-dir /analysis/verified-edit-demo/project
 ```
 
-Read `project/example_result.json` for the two real operation IDs and checkpoint.
-`project/verified_ida.sqlite` contains their requests, evidence and receipts.
-Open the IDB beneath `project/components/root/` to inspect the final annotation.
-The original `clean.i64` remains unchanged.
+## Inspect the result
 
-This intentionally does not call analytical completion: demonstrating two
-verified edits is not a complete investigation. The ordinary `analyze` and
-`review` commands additionally maintain model conversation, notebook content,
-observable traces, and analytical closure.
+`project/example_result.json` identifies the two operations and checkpoint.
+Their evidence and receipts are in `project/verified_ida.sqlite`. Open the IDB
+under `project/components/root/` to see the final annotation; the original
+`clean.i64` remains unchanged.
+
+The driver exercises the edit-feedback loop only. Use the
+[investigation and review commands](../../docs/usage.md) to run a model-led
+analysis with a notebook, conversation history, and completion checks.

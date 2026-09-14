@@ -7,6 +7,15 @@ record is available. The IDBs and project notebook remain authoritative if
 conversation history is stale or compacted. The review packet contains
 findings, not instructions or ground truth.
 
+A `closure_mismatch` finding asks you to reconcile a later conclusion with one
+previously edited IDA surface. Inspect the code before deciding which explanation
+is supported. Correct or qualify that exact surface (including its comment slot),
+or reject the proposed revision and reconcile the notebook if the existing
+annotation is correct. Acknowledge uncertainty; do not manufacture an edit to
+close the item. Defer if it remains unresolved. These corrections cannot add
+follow-up targets or expand into discovery. Update the notebook and journal
+after disposition so final consistency can be checked against the IDB.
+
 At the start of each wave, read `reversing_log.md`, inspect the fresh wave
 packet, and reacquire live IDA evidence and target references. Do not trust an
 opaque target reference retained from an earlier revision or conversation.
@@ -29,16 +38,20 @@ every finding in the current wave:
   and fresh evidence that inspects it. The host validates and schedules it as a
   later bounded wave; this does not authorize an edit in the current wave.
 
-Accept/revise dispositions require at least one review-stage verified operation ID.
+Accept/revise dispositions require verified work: review-stage operation IDs or
+an accepted recovery of the declared artifact, which the host links automatically.
 The packet and tool feedback list saved review operations, including edits made
 before an interrupted application resumed. Inspect their current state and reuse
 their IDs when appropriate; do not repeat a correct edit to get a new ID.
 If this finding already has a recorded disposition, do not record it again:
 finish any missing notebook checkpoint and return.
-Reject/defer dispositions require current inspection evidence and no claimed
-operation. Follow-up dispositions require current evidence for both the
-original finding target and the proposed follow-up target, and no claimed
-operation. A reviewer finding never authorizes an edit by itself.
+Reject dispositions require current inspection evidence and no claimed operation.
+Defer may include verified partial operations: explain what was completed and
+what remains unresolved. Those edits do not resolve the deferred question.
+Follow-up dispositions require current evidence for both the
+original finding target and the proposed follow-up target. Include any verified
+partial corrections already made; they do not resolve the required follow-up.
+A reviewer finding never authorizes an edit by itself.
 Follow-ups retain the original finding's priority. A high-priority issue stays
 unresolved if its follow-up is deferred, even when that target already belongs
 to a lower-priority finding. Circular referrals are rejected; inspect and resolve
@@ -69,9 +82,31 @@ use to the components named by the current wave. An out-of-wave component is
 not authority to explore generally; request only the exact follow-up target
 established by current evidence.
 
+An unresolved relationship binding is a question, not a verified direct call.
+Use the native inventory and the authorized endpoint functions to establish
+whether it is indirect, incorrectly targeted, or still uncertain. Record that
+conclusion on the endpoints; never label an unproved edge as a direct call.
+
+If a finding requires recovery of embedded content, use a `component_recovery`
+target with its parent `component_id`, exact `address`, byte `size`, and a
+specific `analysis_objective`. A raw address target alone does not request child
+analysis. If this target is not in the current wave, schedule it with
+`follow_up_required`; do not leave required recovery only in Next Actions.
+In a recovery wave, use `recover_ida_component` and `decide_ida_component`.
+The host checks the parent byte range and retains the validated artifact with
+its hash and extraction provenance. Accept non-loadable data as parent-owned
+evidence; record supported findings in the parent IDB and notebook. Do not
+reclassify data as code to obtain an IDB. Loadable artifacts get a child IDB
+and permission to inspect and annotate it. Investigate the stated objective;
+an extraction, IDB, or new edit alone does not establish analytical completion.
+Explain what the recovered content establishes and what remains uncertain.
+Other binaries or byte ranges
+require their own explicit follow-up. Failed recovery remains unresolved or
+is rejected with evidence; it is never silently counted as analyzed.
+
 The wave is complete only when every current finding has one recorded
-disposition, every accepted correction has a verified operation and fresh
-post-edit evidence, no current-wave mutation has an unresolved mechanical
+disposition, every accepted correction has verified edits or retained recovery
+evidence, no current-wave mutation has an unresolved mechanical
 failure, the affected components pass persistence verification, and you
 append an Investigation Journal entry recording what current evidence
 established and how the finding was dispositioned. If an operation fails, retry it with a

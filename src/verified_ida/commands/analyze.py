@@ -89,7 +89,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--instructions-path",
         help=(
-            "Optional complete instruction artifact for a controlled experiment; "
+            "Optional replacement analysis instructions; "
             "the exact content is copied into prompt_snapshots."
         ),
     )
@@ -120,12 +120,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--component-handoff-policy",
-        choices=["none", "advisory", "required"],
+        choices=["none", "advisory"],
         default="advisory",
         help=(
             "Parent-to-child context checkpoint policy. Advisory records a "
-            "specific warning without preventing a switch; required is an "
-            "experimental gate used only in bounded comparisons."
+            "specific warning without preventing a switch."
         ),
     )
     parser.add_argument(
@@ -179,7 +178,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                 DEFAULT_COMPACT_THRESHOLD_TOKENS,
             )
         ),
-        help="Responses server-compaction threshold; zero disables it for controls.",
+        help="Responses server-compaction threshold; zero disables it.",
     )
     parser.add_argument(
         "--session-prune-bytes",
@@ -198,7 +197,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--intervention-note",
         action="append",
         default=[],
-        help="Record a user-directed experimental-condition change in the trace.",
+        help="Record an operator intervention in the investigation trace.",
     )
     parser.add_argument("--print-tool-contract", action="store_true")
     return parser.parse_args(argv)

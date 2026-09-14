@@ -41,16 +41,17 @@ from .closure_review import (
 )
 from .components import ComponentRecoveryService
 from .child_environment import child_environment
-from .errors import OperationError
+from .errors import OperationError, RelationshipBindingError
 from .project_lock import ProjectLock
 from .frontier import AnalysisFrontier
 from .journal import (
     CALL_FLOW_NODE_OUTCOMES,
     CALL_FLOW_PARENT_OUTCOMES,
+    JournalError,
     VerifiedIdaJournal,
     stable_id,
 )
-from .model_tools import READ_ONLY_QUERIES, READ_ONLY_QUERY_LIMITS
+from .model_tools import READ_ONLY_QUERIES, READ_ONLY_QUERY_LIMITS, RESERVED_QUERY_OPTIONS
 from .query_contract import (
     QUERY_FAMILIES,
     QueryContractError,
@@ -81,7 +82,6 @@ from .workspace import (
 from static_extractor_script import validate_static_extractor_script
 from component_extraction import recovery_capability_manifest
 from .analysis_feedback import (
-    ANALYSIS_FEEDBACK_COMPATIBILITY_PROFILES,
     ANALYSIS_FEEDBACK_PROFILES,
     analysis_feedback_schema,
     build_analysis_feedback,
@@ -527,10 +527,7 @@ class VerifiedIdaRuntime:
             Path(__file__).resolve().parents[2] / "scripts" / "verified_ida_session_ida.py"
         )
         self.checkpoint_interval = max(1, int(checkpoint_interval))
-        accepted_feedback_profiles = (
-            ANALYSIS_FEEDBACK_PROFILES
-            + ANALYSIS_FEEDBACK_COMPATIBILITY_PROFILES
-        )
+        accepted_feedback_profiles = ANALYSIS_FEEDBACK_PROFILES
         if analysis_feedback_profile not in accepted_feedback_profiles:
             raise RuntimeError(
                 "Unsupported analysis feedback profile: %s (choose %s)"
@@ -540,7 +537,7 @@ class VerifiedIdaRuntime:
                 )
             )
         self.analysis_feedback_profile = analysis_feedback_profile
-        if component_handoff_policy not in {"none", "advisory", "required"}:
+        if component_handoff_policy not in {"none", "advisory"}:
             raise RuntimeError(
                 "Unsupported component handoff policy: %s"
                 % component_handoff_policy
@@ -792,7 +789,7 @@ class VerifiedIdaRuntime:
                 "Parent-to-child transitions report whether a fresh notebook "
                 "bookmark was recorded after component acceptance."
             ),
-            "required_profile_experimental": True,
+            "available_policies": ["none", "advisory"],
         }
         manifest["analysis_feedback"] = {
             "schema": analysis_feedback_schema(self.analysis_feedback_profile),
@@ -1225,19 +1222,6 @@ class VerifiedIdaRuntime:
             prior_component_id=str(prior_component_id or ""),
             arriving_component=component,
         )
-        if (
-            self.component_handoff_policy == "required"
-            and handoff is not None
-            and handoff["checkpoint_status"] == "missing"
-            and not self.read_only_mode
-        ):
-            return {
-                "status": "component_handoff_checkpoint_required",
-                "switch_performed": False,
-                "active_component_id": prior_component_id,
-                "requested_component_id": component_id,
-                "component_handoff": handoff,
-            }
         if self.read_only_mode:
             checkpoint_current = False
             remind = False
@@ -1319,7 +1303,7 @@ class VerifiedIdaRuntime:
             "checkpoint_status": "missing" if missing else "recorded",
             "parent_component_id": parent_component_id,
             "child_component_id": child_component_id,
-            "blocking": self.component_handoff_policy == "required" and missing,
+            "blocking": False,
             "required_content": [
                 "parent artifact or function that exposed or constructed the child",
                 "accepted child identity and byte provenance",
@@ -1411,12 +1395,20 @@ class VerifiedIdaRuntime:
         query = str(query or "").strip()
         if query not in READ_ONLY_QUERIES:
             raise RuntimeError("Unsupported bounded IDA query: %s" % query)
+        query_options = dict(options or {})
+        reserved = sorted(RESERVED_QUERY_OPTIONS.intersection(query_options))
+        if reserved:
+            raise QueryContractError(
+                "reserved_query_option",
+                "Query options cannot override host fields: %s" % ", ".join(reserved),
+                "Use top-level query, target, component_id, and limit fields; "
+                "remove dispatch and artifact fields from options.",
+            )
         if component_id and component_id != self.active_component_id:
             self._ensure_component_active(component_id)
         requested_limit = max(1, int(limit))
         effective_limit = min(requested_limit, READ_ONLY_QUERY_LIMITS[query])
-        task = {"task_type": query, "limit": effective_limit}
-        task.update(dict(options or {}))
+        task = {**query_options, "task_type": query, "limit": effective_limit}
         if target not in (None, ""):
             task["target"] = target
         response = self.session.query(task)
@@ -1530,7 +1522,7 @@ class VerifiedIdaRuntime:
         if isinstance(function, Mapping) and function.get("start"):
             return "function", _address(function["start"])
         if query == "inspect_struct":
-            return "named_type", str(target or result.get("name") or "")
+            return "named_type", str(result.get("name") or result.get("query") or target or "")
         if query in {"inspect_addr", "inspect_global_users"}:
             return "global", _address(target)
         if target not in (None, ""):
@@ -1576,6 +1568,8 @@ class VerifiedIdaRuntime:
             )
         if query == "inspect_struct":
             struct = result.get("struct")
+            if result.get("lookup_complete") is not True:
+                return None
             name = result.get("name") or result.get("query") or requested_target
             if isinstance(struct, Mapping):
                 name = struct.get("name") or name
@@ -1669,16 +1663,20 @@ class VerifiedIdaRuntime:
                 if _address(edge.get("callsite")) == requested_callsite
             ]
         if not matches:
-            raise RuntimeError(
-                "IDA does not show the requested exact direct-call relationship"
+            raise RelationshipBindingError(
+                "IDA does not show the requested exact direct-call relationship",
+                details={"status": "no_direct_match", "matches": [],
+                         "inventory_evidence_id": inventory_evidence_id},
             )
         if len(matches) > 1:
-            raise RuntimeError(
+            raise RelationshipBindingError(
                 "The source calls this destination at multiple sites; choose one "
                 "callsite_address from: %s"
                 % ", ".join(
                     sorted(_address(edge.get("callsite")) for edge in matches)
-                )
+                ),
+                details={"status": "ambiguous", "matches": matches,
+                         "inventory_evidence_id": inventory_evidence_id},
             )
         selected_callsite = _address(matches[0].get("callsite"))
         source_inspection = self.inspect(
@@ -2121,8 +2119,8 @@ class VerifiedIdaRuntime:
                 code=str(result.get("status") or "component_activation_failed"),
                 details=result,
                 recovery=(
-                    "Record the requested parent/child context in reversing_log.md, "
-                    "then switch to the requested component and retry the operation."
+                    "Inspect the switch error and current component state. Restore "
+                    "the requested component before retrying the operation."
                 ),
             )
 
@@ -3829,9 +3827,9 @@ class VerifiedIdaRuntime:
             )
         if str(kwargs.get("outcome") or "").lower() == "revised":
             from pydantic import TypeAdapter
-            from .review_contracts import ReviewTarget
+            from .review_contracts import ReconciliationTarget
 
-            normalized_targets = TypeAdapter(list[ReviewTarget]).validate_python(
+            normalized_targets = TypeAdapter(list[ReconciliationTarget]).validate_python(
                 list(kwargs.get("revised_targets") or [])
             )
             kwargs["revised_targets"] = [
@@ -3969,7 +3967,22 @@ class VerifiedIdaRuntime:
         return self.journal.abandon_operation(**kwargs)
 
     def completion_status(self) -> dict[str, Any]:
-        return self.journal.completion_status()
+        from .components import retained_artifact
+        status = self.journal.completion_status()
+        failures = []
+        # Data artifacts have no IDB checkpoint. Verify the retained bytes that
+        # take its place; ordinary child IDBs retain their existing checks.
+        for row in self.journal.connection.execute(
+            "SELECT extraction_id FROM extractions WHERE status = 'accepted' AND child_component_id IS NULL"
+        ).fetchall():
+            try:
+                retained_artifact(self.journal.extraction(row["extraction_id"]))
+            except (OSError, JournalError) as exc:
+                failures.append({"extraction_id": row["extraction_id"], "error": str(exc)})
+        status["artifact_verification_failures"] = failures
+        if failures:
+            status.update(may_finish=False, ready_for_checkpoint=False)
+        return status
 
     def _closure_input_fingerprint(
         self,
@@ -4330,6 +4343,7 @@ class VerifiedIdaRuntime:
                                 "is_arg",
                                 "has_user_name",
                                 "name_provenance",
+                                "name_from_user_prototype",
                                 "has_user_type",
                                 "type_provenance",
                                 "location",

@@ -167,17 +167,9 @@ def _split_tail_item_if_requested(ea, item):
 
 
 def _global_type_declaration(item):
-    text = str(item.get("proposed_type") or item.get("proposed") or item.get("type") or "").strip()
-    if not text:
-        return ""
-    text = text.rstrip(";").strip()
-    address_name = str(item.get("name") or item.get("proposed_name") or item.get("new_name") or "").strip()
-    if address_name and text.endswith(" " + address_name):
-        return text[: -len(address_name)].strip()
-    match = re.match(r"^(?P<type>.+?)\s+[_A-Za-z?$@.][_0-9A-Za-z?$@.]*$", text)
-    if match:
-        return match.group("type").strip()
-    return text
+    # IDA parses both a type and a full declaration. Do not guess that the
+    # last identifier is a variable name (it may be "int" or a struct tag).
+    return str(item.get("proposed_type") or item.get("proposed") or item.get("type") or "").strip()
 
 
 _PROTOTYPE_DECLARATION_KEYS = ("proposed", "proposed_type", "prototype", "new_prototype", "declaration", "type")
@@ -213,57 +205,6 @@ def _named_type_exists(name):
         return idc.get_struc_id(name) != idc.BADADDR
     except Exception:
         return False
-
-
-COMMON_EXTERNAL_TYPE_TOKENS = {
-    "BOOL",
-    "BOOLEAN",
-    "BYTE",
-    "CHAR",
-    "CRITICAL_SECTION",
-    "DWORD",
-    "DWORD64",
-    "HANDLE",
-    "HRESULT",
-    "HWND",
-    "LPCSTR",
-    "LPCWSTR",
-    "LPSTR",
-    "LPVOID",
-    "LPWSTR",
-    "NTSTATUS",
-    "PDRIVER_OBJECT",
-    "PIRP",
-    "PUNICODE_STRING",
-    "SIZE_T",
-    "SSIZE_T",
-    "UCHAR",
-    "UINT",
-    "ULONG",
-    "ULONG_PTR",
-    "UNICODE_STRING",
-    "USHORT",
-    "WCHAR",
-    "_CONTEXT",
-    "_DISPATCHER_CONTEXT",
-    "_EXCEPTION_RECORD",
-}
-
-
-def _prototype_missing_type_hints(prototype):
-    text = _normalize_declaration_text(prototype)
-    if not text:
-        return []
-    tokens = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", text))
-    missing = []
-    for token in sorted(tokens):
-        if token not in COMMON_EXTERNAL_TYPE_TOKENS:
-            continue
-        base = token[1:] if token.startswith("P") and len(token) > 2 and token[1].isupper() else token
-        if _named_type_exists(token) or _named_type_exists(base):
-            continue
-        missing.append(token)
-    return missing
 
 
 def _type_replace_flag():
@@ -489,18 +430,8 @@ def _apply_typedef_type_update(item, replace_existing=False):
 
 
 def _normalize_type_text(value):
-    text = " ".join(str(value or "").replace("*", " * ").split())
-    replacements = {
-        "unsigned __int8": "unsigned char",
-        "signed __int8": "signed char",
-        "__int8": "char",
-        "_BYTE": "unsigned char",
-        "_DWORD": "unsigned int",
-        "struct lua_State": "lua_State",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    return text
+    """Normalize whitespace only; IDA determines type identity."""
+    return " ".join(str(value or "").replace("*", " * ").split())
 
 
 def _lvar_type_text(lvar):
@@ -585,52 +516,25 @@ def _array_decl_for_type(type_string, name):
     return "%s %s%s;" % (match.group("base").strip(), name, match.group("suffix").replace(" ", ""))
 
 
-def _windows_typedef_expansions(type_string):
-    replacements = {
-        "LPCSTR": "const char *",
-        "PCSTR": "const char *",
-        "LPSTR": "char *",
-        "PSTR": "char *",
-        "LPCWSTR": "const wchar_t *",
-        "PCWSTR": "const wchar_t *",
-        "LPWSTR": "wchar_t *",
-        "PWSTR": "wchar_t *",
-        "LPBYTE": "unsigned char *",
-        "PBYTE": "unsigned char *",
-        "BYTE": "unsigned char",
-        "DWORD": "unsigned int",
-        "BOOL": "int",
-    }
-    values = [type_string]
-    for old, new in replacements.items():
-        pattern = r"\b%s\b" % re.escape(old)
-        if re.search(pattern, type_string):
-            expanded = re.sub(pattern, new, type_string)
-            if expanded not in values:
-                values.append(expanded)
-    return values
-
-
 def _parse_lvar_type(type_string, target_name=None):
     type_string = str(type_string or "").strip().rstrip(";")
     if not type_string:
         return None
     name = "__ida_harness_lvar"
     declarations = []
-    for candidate in _windows_typedef_expansions(type_string):
-        if target_name and re.search(r"\b%s\b" % re.escape(str(target_name)), candidate):
-            declarations.append((candidate + ";", ida_typeinf.PT_VAR))
-            declarations.append((
-                re.sub(r"\b%s\b" % re.escape(str(target_name)), name, candidate, count=1) + ";",
-                ida_typeinf.PT_VAR,
-            ))
-        array_decl = _array_decl_for_type(candidate, name)
-        if array_decl:
-            declarations.append((array_decl, ida_typeinf.PT_VAR))
-        declarations.extend([
-            ("%s %s;" % (candidate, name), ida_typeinf.PT_VAR),
-            ("%s;" % candidate, ida_typeinf.PT_TYP),
-        ])
+    if target_name and re.search(r"\b%s\b" % re.escape(str(target_name)), type_string):
+        declarations.append((type_string + ";", ida_typeinf.PT_VAR))
+        declarations.append((
+            re.sub(r"\b%s\b" % re.escape(str(target_name)), name, type_string, count=1) + ";",
+            ida_typeinf.PT_VAR,
+        ))
+    array_decl = _array_decl_for_type(type_string, name)
+    if array_decl:
+        declarations.append((array_decl, ida_typeinf.PT_VAR))
+    declarations.extend([
+        ("%s %s;" % (type_string, name), ida_typeinf.PT_VAR),
+        ("%s;" % type_string, ida_typeinf.PT_TYP),
+    ])
 
     seen = set()
     for decl, parse_kind in declarations:
@@ -701,14 +605,17 @@ def _current_type_matches(lvar, item):
     current_type = item.get("current_type")
     if not current_type:
         return True
-    return _normalize_type_text(current_type) == _normalize_type_text(_lvar_type_text(lvar))
+    return _live_type_matches_proposed(lvar, current_type, None)
 
 
 def _live_type_matches_proposed(lvar, proposed_type, parsed_type):
-    return _normalize_type_text(_lvar_type_text(lvar)) in {
-        _normalize_type_text(proposed_type),
-        _normalize_type_text(parsed_type),
-    }
+    expected = _parse_lvar_type(proposed_type)
+    if expected is None:
+        return False
+    try:
+        return bool(lvar.type().equals_to(expected))
+    except Exception:
+        return False
 
 
 def _compatible_lvar_anchor(lvar, item, *, check_current_type=True):
@@ -831,7 +738,6 @@ def _apply_local_type_update(item):
     if ("is_arg" in item or "is_parameter" in item) and not _role_matches(lvar, item):
         return "deferred", "lvar argument/local role changed before type application"
     current_type = item.get("current_type")
-    live_type = _lvar_type_text(lvar)
     if _live_type_matches_proposed(lvar, proposed_type, parsed_type):
         if proposed_name:
             name_status, name_reason = _apply_lvar_name(func_ea, lvar, proposed_name)
@@ -851,7 +757,7 @@ def _apply_local_type_update(item):
             if name_status == "applied":
                 return "applied", "Hex-Rays accepted and reread the local name"
         return "confirmed_existing", ""
-    if current_type and _normalize_type_text(current_type) != _normalize_type_text(live_type):
+    if current_type and not _current_type_matches(lvar, item):
         return "deferred", "lvar current type changed before type application"
     try:
         if not lvar.accepts_type(tif, False):
@@ -885,10 +791,7 @@ def _apply_local_type_update(item):
         refreshed_lvar, reason = _find_lvar(refreshed, item, check_current_type=False)
         if refreshed_lvar is None:
             return "deferred", "Could not confirm persisted lvar type after rerender: %s" % reason
-        if _normalize_type_text(_lvar_type_text(refreshed_lvar)) not in {
-            _normalize_type_text(proposed_type),
-            _normalize_type_text(parsed_type),
-        }:
+        if not _live_type_matches_proposed(refreshed_lvar, proposed_type, parsed_type):
             return "failed", "Persisted lvar type did not reread as proposed"
         if proposed_name and str(getattr(refreshed_lvar, "name", "") or "") != proposed_name:
             return "failed", "Persisted lvar name did not reread as proposed"
@@ -1012,10 +915,8 @@ def apply_updates(update_bundle, *, replace_existing_named_types=False):
                 record.update({"status": "applied", "reason": "IDA accepted function prototype update"})
             else:
                 summary["failed"] += 1
-                missing_types = _prototype_missing_type_hints(proposed_type)
                 reason = "IDA rejected prototype update at %s" % item.get("address")
-                if missing_types:
-                    reason += "; probable missing named/platform types: %s" % ", ".join(missing_types)
+                reason += "; declaration retained; the API did not report a specific cause"
                 summary["errors"].append(reason)
                 record.update({"status": "failed", "reason": reason})
             summary["records"].append(record)

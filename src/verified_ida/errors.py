@@ -20,6 +20,20 @@ class OperationError(ValueError):
         self.details = details or {}
 
 
+class RelationshipBindingError(OperationError):
+    """A valid relationship question has no unique native direct-call binding."""
+
+    def __init__(self, message: str, *, details: dict[str, Any]):
+        super().__init__(
+            message, code="relationship_binding_unresolved", details=details,
+            recovery=(
+                "Inspect the endpoints and call inventory. Select an exact native "
+                "callsite if present; otherwise document the supported indirect "
+                "relationship or uncertainty on the endpoint functions."
+            ),
+        )
+
+
 def tool_error(exc: Exception) -> dict[str, Any]:
     result: dict[str, Any] = {
         "type": type(exc).__name__,

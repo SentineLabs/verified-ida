@@ -23,6 +23,7 @@ import ida_lines
 import ida_name
 import ida_nalt
 import ida_segment
+import ida_typeinf
 import idautils
 import idc
 try:
@@ -139,23 +140,17 @@ def _safe_dword(ea):
 
 
 def _pointer_size():
-    try:
-        if idaapi is not None and hasattr(idaapi, "inf_is_64bit"):
-            return 8 if idaapi.inf_is_64bit() else 4
-        if idaapi is not None and hasattr(idaapi, "get_inf_structure"):
-            return 8 if idaapi.get_inf_structure().is_64bit() else 4
-    except Exception:
-        pass
-    return 4
+    import ida_ida
+    bits = int(ida_ida.inf_get_app_bitness())
+    if bits not in {16, 32, 64}:
+        raise ValueError("IDA did not provide a supported address width")
+    return bits // 8
 
 
 def _safe_pointer(ea):
     try:
-        value = (
-            ida_bytes.get_qword(ea)
-            if _pointer_size() == 8 and hasattr(ida_bytes, "get_qword")
-            else ida_bytes.get_dword(ea)
-        )
+        readers = {2: ida_bytes.get_word, 4: ida_bytes.get_dword, 8: ida_bytes.get_qword}
+        value = readers[_pointer_size()](ea)
     except Exception:
         return None
     if value is None or value == idc.BADADDR:
@@ -444,7 +439,8 @@ def query_xrefs(address, limit=80):
         return {"ok": False, "error": "missing address"}
     refs_to = []
     refs_from = []
-    for xref in list(idautils.XrefsTo(ea, 0))[:limit]:
+    incoming = list(idautils.XrefsTo(ea, 0))
+    for xref in incoming[:limit]:
         refs_to.append({
             "from": _hex(xref.frm),
             "to": _hex(xref.to),
@@ -471,6 +467,23 @@ def query_xrefs(address, limit=80):
         "refs_from": refs_from,
         "count_to": len(refs_to),
         "count_from": len(refs_from),
+        "total_to": len(incoming),
+        "counts_are_returned_rows": True,
+        "possibly_truncated": (
+            len(incoming) > limit or len(heads) > 2000 or len(refs_from) >= limit
+        ),
+        "incoming_truncated": len(incoming) > limit,
+        "outgoing_possibly_truncated": len(heads) > 2000 or len(refs_from) >= limit,
+        "scan_item_limit": 2000,
+        "reference_scope": (
+            "Incoming code/data references to this address; outgoing code references "
+            "from at most 2000 items in its containing function (or this address). "
+            "Outgoing code references include jumps, not only calls."
+        ),
+        "continuation": (
+            "If truncated, inspect specific reference sites or use read-only "
+            "IDAPython to enumerate the remaining references."
+        ),
     }
 
 
@@ -547,7 +560,8 @@ def query_callers_callees(address, limit=120):
     if not func:
         return {"ok": False, "error": "no function at address", "address": _hex(ea)}
     callers = []
-    for ref in list(idautils.CodeRefsTo(func.start_ea, 0))[:limit]:
+    incoming = list(idautils.CodeRefsTo(func.start_ea, 0))
+    for ref in incoming[:limit]:
         caller_func = ida_funcs.get_func(ref)
         if caller_func and int(caller_func.start_ea) == int(func.start_ea):
             continue
@@ -581,6 +595,15 @@ def query_callers_callees(address, limit=120):
         "callees": callees,
         "caller_count": len(callers),
         "callee_count": len(callees),
+        "edge_semantics": "IDA code references; includes jumps as well as calls",
+        "counts_are_returned_rows": True,
+        "callers_possibly_truncated": len(incoming) > limit,
+        "callees_possibly_truncated": len(callees) >= limit,
+        "possibly_truncated": len(incoming) > limit or len(callees) >= limit,
+        "continuation": (
+            "If truncated, inspect individual callsites or use read-only IDAPython "
+            "to enumerate the remaining code references."
+        ),
     }
 
 
@@ -772,14 +795,16 @@ def query_data_refs(address, limit=80):
         return {"ok": False, "error": "missing address"}
     refs_to = []
     refs_from = []
-    for frm in list(idautils.DataRefsTo(ea))[:limit]:
+    incoming = list(idautils.DataRefsTo(ea))
+    outgoing = list(idautils.DataRefsFrom(ea))
+    for frm in incoming[:limit]:
         refs_to.append({
             "from": _hex(frm),
             "to": _hex(ea),
             "function": _func_at(frm),
             "segment": _segment(frm),
         })
-    for to in list(idautils.DataRefsFrom(ea))[:limit]:
+    for to in outgoing[:limit]:
         refs_from.append({
             "from": _hex(ea),
             "to": _hex(to),
@@ -793,6 +818,15 @@ def query_data_refs(address, limit=80):
         "refs_from": refs_from,
         "count_to": len(refs_to),
         "count_from": len(refs_from),
+        "total_to": len(incoming),
+        "total_from": len(outgoing),
+        "counts_are_returned_rows": True,
+        "possibly_truncated": len(incoming) > limit or len(outgoing) > limit,
+        "reference_scope": "Data references to and from this address, not the whole function.",
+        "continuation": (
+            "If truncated, inspect specific reference sites or use read-only "
+            "IDAPython to enumerate the remaining references."
+        ),
     }
 
 
@@ -945,6 +979,7 @@ def render_data_object(address, size=256):
         "segment": _segment(ea),
         "file_offset": _hex(_file_offset(ea)),
         "item_size": ida_bytes.get_item_size(ea),
+        "item_head": _hex(ida_bytes.get_item_head(ea)),
         "is_code": bool(ida_bytes.is_code(flags)),
         "is_data": bool(ida_bytes.is_data(flags)),
         "string": _string_at(ea),
@@ -1138,7 +1173,7 @@ def _all_string_rows():
             "length": int(getattr(item, "length", len(text)) or len(text)),
             "type": int(getattr(item, "strtype", 0) or 0),
             "segment": _segment_name(item.ea),
-            "text": text[:512],
+            "text": text,
             "refs_to_count": len(refs),
             "sample_refs_to": [
                 {"from": _hex(ref), "function": _func_at(ref)}
@@ -1271,7 +1306,7 @@ def survey_idb():
     }
 
 
-def _page(items, *, entity, filters, order, limit, offset):
+def _page(items, *, entity, filters, order, limit, offset, scan_complete=True):
     page_limit = max(1, min(int(limit or 100), 500))
     page_offset = max(0, int(offset or 0))
     page_items = items[page_offset:page_offset + page_limit]
@@ -1288,11 +1323,11 @@ def _page(items, *, entity, filters, order, limit, offset):
             "returned": len(page_items),
             "limit": page_limit,
             "total": len(items),
-            "total_relation": "exact",
+            "total_relation": "exact" if scan_complete else "lower_bound",
             "has_more": next_offset < len(items),
             "next_offset": next_offset if next_offset < len(items) else None,
         },
-        "scan": {"complete": True},
+        "scan": {"complete": bool(scan_complete)},
         "items": page_items,
     }
 
@@ -1428,22 +1463,30 @@ def query_strings_collection(filters=None, order="address", limit=100, offset=0)
         rows.sort(key=lambda row: (str(row.get("text") or "").lower(), int(row["address"], 0)))
     else:
         rows.sort(key=lambda row: int(row["address"], 0))
-    return _page(rows, entity="strings", filters=filters, order=order, limit=limit, offset=offset)
+    result = _page(rows, entity="strings", filters=filters, order=order, limit=limit, offset=offset)
+    # Filtering and ordering use the complete detected value; only its display
+    # is bounded. The address and IDA length allow a follow-up byte query.
+    result["items"] = [
+        {**row, "text": row["text"][:512], "text_length": len(row["text"]),
+         "text_truncated": len(row["text"]) > 512}
+        for row in result["items"]
+    ]
+    return result
 
 
 def query_types_collection(filters=None, order="name", limit=100, offset=0):
     filters = dict(filters or {})
     inventory = _local_type_inventory(limit=None)
-    if not inventory.get("available") and inventory.get("error"):
+    if not inventory.get("available"):
         return {
             "ok": False,
-            "error": inventory.get("error"),
+            "error": inventory.get("error") or "IDA local-type inventory is unavailable",
             "recovery": "Inspect IDA local-type availability before querying types.",
         }
     rows = list(inventory.get("items") or [])
     kind = str(filters.get("kind") or "all")
     prefix = str(filters.get("name_prefix") or "")
-    if kind in {"struct", "enum"}:
+    if kind in {"struct", "union", "enum", "typedef"}:
         rows = [row for row in rows if row.get("kind") == kind]
     if prefix:
         rows = [row for row in rows if str(row.get("name") or "").startswith(prefix)]
@@ -1451,7 +1494,17 @@ def query_types_collection(filters=None, order="name", limit=100, offset=0):
         rows.sort(key=lambda row: (str(row.get("kind") or ""), str(row.get("name") or "").lower()))
     else:
         rows.sort(key=lambda row: str(row.get("name") or "").lower())
-    return _page(rows, entity="types", filters=filters, order=order, limit=limit, offset=offset)
+    result = _page(rows, entity="types", filters=filters, order=order, limit=limit, offset=offset,
+                   scan_complete=inventory.get("scan_complete") is True)
+    result["inventory_scan_complete"] = inventory.get("scan_complete") is True
+    result["inventory_errors"] = inventory.get("errors", [])
+    if not result["scan"]["complete"]:
+        result["scan"]["errors"] = result["inventory_errors"]
+        result["scan"]["recovery"] = (
+            "This page covers successfully inspected types only. No matches "
+            "does not establish absence; inspect an exact type with inspect_struct."
+        )
+    return result
 
 
 def inspect_function_summary(address, sample_limit=12):
@@ -1574,6 +1627,9 @@ def inspect_addr(address, size=32, limit=80):
         "segment": _segment(ea),
         "file_offset": _file_offset(ea),
         "function": _func_at(ea),
+        "item_head": _hex(ida_bytes.get_item_head(ea)),
+        "is_data": bool(ida_bytes.is_data(ida_bytes.get_flags(ea))),
+        "is_code": bool(ida_bytes.is_code(ida_bytes.get_flags(ea))),
         "item_size": int(getattr(ida_bytes, "get_item_size", lambda _ea: 0)(ea) or 0),
         "bytes": data.hex(),
         "disassembly": _safe_disassembly(ea),
@@ -1673,35 +1729,62 @@ def list_globals(prefix=None, limit=160):
     return {"ok": True, "globals": rows, "count": len(rows), "prefix": prefix_text or None}
 
 
-def _local_type_inventory(prefix=None, limit=160):
-    prefix_text = str(prefix or "")
-    try:
-        from verified_ida_annotations_export_ida import export_local_named_types
+def _native_type_record(name, tif, member_limit=None):
+    flags = (ida_typeinf.PRTYPE_MULTI | ida_typeinf.PRTYPE_TYPE
+             | ida_typeinf.PRTYPE_SEMI | ida_typeinf.PRTYPE_DEF)
+    declaration = ida_typeinf.print_tinfo("", 0, 0, flags, tif, name, "")
+    members = []
+    kind = "typedef"
+    if tif.is_typedef():
+        pass
+    elif tif.is_udt():
+        kind = "union" if tif.is_union() else "struct"
+        details = ida_typeinf.udt_type_data_t()
+        if not tif.get_udt_details(details):
+            raise ValueError("IDA could not read the type's members")
+        for member in details:
+            members.append({"name": str(member.name), "type": str(member.type.dstr()),
+                            "offset": int(member.offset) // 8, "offset_bits": int(member.offset),
+                            "size": (int(member.size) + 7) // 8, "size_bits": int(member.size)})
+    elif tif.is_enum():
+        kind = "enum"
+        details = ida_typeinf.enum_type_data_t()
+        if not tif.get_enum_details(details):
+            raise ValueError("IDA could not read the enum's members")
+        members = [{"name": str(member.name), "value": int(member.value)} for member in details]
+    total = len(members)
+    if member_limit is not None:
+        members = members[:max(1, int(member_limit))]
+    size = int(tif.get_size())
+    return {"name": name, "kind": kind, "size": None if size == idc.BADADDR else size,
+            "members": members, "member_count": total, "members_truncated": len(members) < total,
+            "declaration": str(declaration or tif.dstr()), "source": "ida_tinfo"}
 
-        local_types = export_local_named_types()
-    except Exception as exc:
-        return {"available": False, "error": str(exc), "items": []}
+
+def _local_type_inventory(prefix=None, limit=160):
     items = []
-    bounded_limit = None if limit is None else max(1, min(int(limit or 160), 100000))
-    for kind in ("structs", "enums"):
-        for item in local_types.get(kind) or []:
-            name = str(item.get("name") or "")
-            if prefix_text and not name.startswith(prefix_text):
+    errors = []
+    try:
+        til = ida_typeinf.get_idati()
+        upper = int(ida_typeinf.get_ordinal_limit(til))
+        for ordinal in range(1, upper):
+            name = str(ida_typeinf.get_numbered_type_name(til, ordinal) or "")
+            if not name or (prefix and not name.startswith(str(prefix))):
                 continue
-            row = dict(item)
-            row["kind"] = "struct" if kind == "structs" else "enum"
-            items.append(row)
-            if bounded_limit is not None and len(items) >= bounded_limit:
-                return {
-                    "available": bool(local_types.get("available")),
-                    "items": items,
-                    "scan_complete": False,
-                }
-    return {
-        "available": bool(local_types.get("available")),
-        "items": items,
-        "scan_complete": True,
-    }
+            tif = ida_typeinf.tinfo_t()
+            try:
+                if not tif.get_numbered_type(til, ordinal):
+                    raise ValueError("numbered type unavailable")
+                row = _native_type_record(name, tif)
+                row["ordinal"] = ordinal
+                items.append(row)
+            except Exception as exc:
+                errors.append({"name": name, "error": str(exc)})
+        cap = len(items) if limit is None else max(1, int(limit))
+        return {"available": True, "items": items[:cap], "total": len(items),
+                "scan_complete": not errors, "has_more": len(items) > cap, "errors": errors}
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "items": [], "scan_complete": False}
 
 
 def list_local_types(prefix=None, limit=160):
@@ -1712,6 +1795,10 @@ def list_local_types(prefix=None, limit=160):
         "error": inventory.get("error"),
         "local_types": inventory.get("items") or [],
         "count": len(inventory.get("items") or []),
+        "total": inventory.get("total"),
+        "has_more": inventory.get("has_more", False),
+        "scan_complete": inventory.get("scan_complete") is True,
+        "errors": inventory.get("errors", []),
         "prefix": str(prefix or "") or None,
     }
 
@@ -1720,43 +1807,25 @@ def inspect_struct(name, limit=160):
     target = str(name or "").strip()
     if not target:
         return {"ok": False, "error": "missing struct/type name"}
-    inventory = _local_type_inventory(limit=limit)
-    target_lower = target.lower()
-    matches = [
-        item for item in inventory.get("items") or []
-        if str(item.get("name") or "").lower() == target_lower
-    ]
-    if not matches:
-        matches = [
-            item for item in inventory.get("items") or []
-            if target_lower in str(item.get("name") or "").lower()
-        ][:8]
-    return {
-        "ok": bool(matches),
-        "query": target,
-        "struct": matches[0] if len(matches) == 1 else None,
-        "matches": matches,
-        "count": len(matches),
-        "error": None if matches else "struct/type not found",
-    }
+    try:
+        tif = ida_typeinf.tinfo_t()
+        found = bool(tif.get_named_type(ida_typeinf.get_idati(), target))
+        row = _native_type_record(target, tif, member_limit=limit) if found else None
+        return {"ok": found, "query": target, "name": target, "struct": row,
+                "matches": [row] if row else [], "count": int(found),
+                "found": found, "lookup_complete": True, "match_mode": "exact_case_sensitive",
+                "error": None if found else "named type not found by exact lookup",
+                "recovery": None if found else "Use query_ida_types for discovery, or define this exact new type."}
+    except Exception as exc:
+        return {"ok": False, "query": target, "lookup_complete": False, "error": str(exc)}
 
 
 def read_struct(name, limit=160):
     result = inspect_struct(name, limit)
     if not result.get("ok"):
         return result
-    item = result.get("struct") or ((result.get("matches") or [None])[0])
-    members = item.get("members") or [] if isinstance(item, dict) else []
-    declaration_lines = ["struct %s {" % (item.get("name") if isinstance(item, dict) else name)]
-    for member in members[:max(1, min(int(limit or 160), 1000))]:
-        declaration_lines.append("  /* %s */ %s %s;" % (
-            member.get("offset"),
-            member.get("type") or "unsigned char",
-            member.get("name") or ("field_%s" % str(member.get("offset") or "unknown").replace("0x", "")),
-        ))
-    declaration_lines.append("};")
     out = dict(result)
-    out["declaration"] = "\n".join(declaration_lines)
+    out["declaration"] = result["struct"]["declaration"]
     return out
 
 
@@ -1764,36 +1833,50 @@ def xrefs_to_field(name, offset=None, limit=120):
     target = str(name or "").strip()
     offset_value = _parse_int(offset)
     if offset_value is None:
-        match = re.search(r"(?:\+|:|@)\s*(0x[0-9a-fA-F]+|[0-9]+)", target)
-        if match:
-            offset_value = _parse_int(match.group(1))
-    if offset_value is None:
         return {"ok": False, "error": "missing field offset", "target": target}
-    patterns = {
-        "0x%x" % offset_value,
-        "%Xh" % offset_value,
-        "%xh" % offset_value,
-        "+%Xh" % offset_value,
-        "+%xh" % offset_value,
-        "+%d" % offset_value,
-    }
+    inspected = inspect_struct(target, limit=limit)
+    if not inspected.get("ok"):
+        return {**inspected, "target": target, "hits": [], "candidates": []}
+    if ida_ua is None:
+        return {"ok": False, "target": target, "error": "native instruction decoding unavailable"}
+    tid = ida_typeinf.get_named_type_tid(target)
     hits = []
+    candidates = []
+    scanned = failed = 0
+    complete = True
+    cap = max(1, min(int(limit or 120), 1000))
     for func_ea in getattr(idautils, "Functions", lambda: [])():
-        func = ida_funcs.get_func(func_ea)
-        if not func:
-            continue
-        for head in list(idautils.FuncItems(func.start_ea))[:4000]:
-            line = _safe_disassembly(head)
-            normalized = line.replace(" ", "")
-            if any(pattern in normalized for pattern in patterns):
-                hits.append({
-                    "address": _hex(head),
-                    "function": _function_summary(func.start_ea),
-                    "disassembly": line,
-                })
-                if len(hits) >= max(1, min(int(limit or 120), 1000)):
-                    return {"ok": True, "target": target, "offset": _hex(offset_value), "hits": hits, "count": len(hits)}
-    return {"ok": True, "target": target, "offset": _hex(offset_value), "hits": hits, "count": len(hits)}
+        for head in idautils.FuncItems(func_ea):
+            if scanned >= 100000 or len(hits) + len(candidates) >= cap:
+                complete = False
+                break
+            scanned += 1
+            insn = ida_ua.insn_t()
+            if ida_ua.decode_insn(insn, head) <= 0:
+                failed += 1
+                continue
+            for index, operand in enumerate(insn.ops):
+                if operand.type != ida_ua.o_displ or int(operand.addr) != offset_value:
+                    continue
+                try:
+                    path, delta = ida_bytes.get_stroff_path(head, index)
+                except Exception:
+                    path, delta = None, None
+                bound = tid != idc.BADADDR and list(path or []) == [tid] and delta == 0
+                row = {"address": _hex(head), "operand_index": index,
+                       "function": _function_summary(func_ea), "disassembly": _safe_disassembly(head),
+                       "binding": "ida_stroff_path" if bound else "unbound_displacement_candidate"}
+                (hits if bound else candidates).append(row)
+                if len(hits) + len(candidates) >= cap:
+                    complete = False
+                    break
+        if not complete:
+            break
+    return {"ok": True, "target": target, "offset": _hex(offset_value), "hits": hits,
+            "count": len(hits), "candidates": candidates, "candidate_count": len(candidates),
+            "scan_complete": complete and failed == 0, "scanned_instructions": scanned,
+            "decode_failures": failed, "truncated": not complete,
+            "interpretation": "Hits require a native structure-offset binding. Candidates only share the displacement; verify object identity. Zero hits does not establish no uses."}
 
 
 def render_switch_table(address, limit=80):
@@ -1899,28 +1982,14 @@ def _candidate_function(func):
     }
 
 
-def _normalize_immediate_for_operand(operand, value):
-    text = str(operand or "").lower()
-    width = None
-    if re.search(r"\b(?:al|ah|bl|bh|cl|ch|dl|dh|sil|dil|spl|bpl|r(?:[89]|1[0-5])b)\b", text):
-        width = 8
-    elif re.search(r"\b(?:ax|bx|cx|dx|si|di|sp|bp|r(?:[89]|1[0-5])w)\b", text):
-        width = 16
-    elif re.search(r"\b(?:eax|ebx|ecx|edx|esi|edi|esp|ebp|r(?:[89]|1[0-5])d)\b", text):
-        width = 32
-    elif re.search(r"\b(?:rax|rbx|rcx|rdx|rsi|rdi|rsp|rbp|r(?:[89]|1[0-5]))\b", text):
-        width = 64
-    elif "byte ptr" in text:
-        width = 8
-    elif "word ptr" in text and "dword ptr" not in text and "qword ptr" not in text:
-        width = 16
-    elif "dword ptr" in text:
-        width = 32
-    elif "qword ptr" in text:
-        width = 64
-    if width is None or width >= 64:
-        return int(value)
-    return int(value) & ((1 << width) - 1)
+def _normalize_immediate_for_operand(address, operand_index, value):
+    if ida_ua is None:
+        return None
+    insn = ida_ua.insn_t()
+    if ida_ua.decode_insn(insn, address) <= 0:
+        return None
+    size = int(ida_ua.get_dtype_size(insn.ops[operand_index].dtype))
+    return int(value) & ((1 << (size * 8)) - 1) if 0 < size <= 8 else None
 
 
 def discover_enum_candidates(limit=120, min_compare_values=3):
@@ -1975,10 +2044,10 @@ def discover_enum_candidates(limit=120, min_compare_values=3):
             if not operand:
                 continue
             value = _normalize_immediate_for_operand(
-                operand,
+                head, 0,
                 int(idc.get_operand_value(head, 1) or 0),
             )
-            if value < 0 or value > 0xFFFFFFFFFFFFFFFF:
+            if value is None or value < 0 or value > 0xFFFFFFFFFFFFFFFF:
                 continue
             target = compare_groups if mnemonic == "cmp" else mask_groups
             row = target.setdefault(operand, {"values": set(), "addresses": [], "mnemonics": set()})
@@ -2068,7 +2137,7 @@ def _pointer_table_owner(ref, window=0x40):
 
 
 def _pointer_table_row(ea, center):
-    value = _safe_dword(ea)
+    value = _safe_pointer(ea)
     pointed_function = _func_at(value) if value is not None else None
     pointed_name = ""
     if pointed_function:
@@ -2089,12 +2158,15 @@ def _pointer_table_row(ea, center):
     }
 
 
-def render_pointer_table_neighborhood(ref, radius=0x10, entry_size=4):
+def render_pointer_table_neighborhood(ref, radius=0x10, entry_size=None):
     try:
         ref = int(ref)
     except Exception:
         return None
-    entry_size = max(1, int(entry_size or 4))
+    pointer_size = _pointer_size()
+    if entry_size is not None and int(entry_size) != pointer_size:
+        return {"ok": False, "error": "entry_size must match IDA's native pointer width"}
+    entry_size = pointer_size
     radius = max(0, int(radius or 0))
     rows = []
     for offset in range(-radius, radius + entry_size, entry_size):
@@ -2104,6 +2176,7 @@ def render_pointer_table_neighborhood(ref, radius=0x10, entry_size=4):
         rows.append(_pointer_table_row(ea, ref))
     return {
         "center": _hex(ref),
+        "source": "ida_native_pointer_width",
         "entry_size": entry_size,
         "radius": radius,
         "nearest_named_owner": _pointer_table_owner(ref),
@@ -2116,7 +2189,8 @@ def render_function_pointer_refs(address, limit=120):
     if ea is None:
         return {"ok": False, "error": "missing address"}
     refs = []
-    for frm in list(idautils.DataRefsTo(ea))[:limit]:
+    incoming = list(idautils.DataRefsTo(ea))
+    for frm in incoming[:limit]:
         refs.append({
             "address": _hex(frm),
             "segment": _segment(frm),
@@ -2131,6 +2205,11 @@ def render_function_pointer_refs(address, limit=120):
         "function": _func_at(ea),
         "refs": refs,
         "count": len(refs),
+        "total": len(incoming),
+        "counts_are_returned_rows": True,
+        "possibly_truncated": len(incoming) > limit,
+        "reference_scope": "IDA data references; a reference alone does not prove a callable pointer.",
+        "continuation": "If truncated, use read-only IDAPython to enumerate remaining data references.",
     }
 
 
@@ -2150,13 +2229,16 @@ def expand_call_graph(address, depth=1, direction="both", limit=120):
     queue = deque([(func.start_ea, 0)])
     nodes[func.start_ea] = _func_at(func.start_ea)
     seen_edges = set()
+    incoming_truncated = False
     while queue and len(nodes) < limit:
         current, level = queue.popleft()
         current_func = ida_funcs.get_func(current)
         if not current_func or level >= depth:
             continue
         if direction in {"both", "callers"}:
-            for ref in list(idautils.CodeRefsTo(current_func.start_ea, 0))[:limit]:
+            incoming = list(idautils.CodeRefsTo(current_func.start_ea, 0))
+            incoming_truncated |= len(incoming) > limit
+            for ref in incoming[:limit]:
                 caller = ida_funcs.get_func(ref)
                 if not caller:
                     continue
@@ -2198,6 +2280,18 @@ def expand_call_graph(address, depth=1, direction="both", limit=120):
         "edges": edges[:limit * 3],
         "node_count": len(nodes),
         "edge_count": min(len(edges), limit * 3),
+        "counts_are_returned_rows": True,
+        "possibly_truncated": (
+            incoming_truncated or len(nodes) >= limit or len(edges) >= limit * 3
+        ),
+        "node_limit": limit,
+        "edge_limit": limit * 3,
+        "edge_semantics": "IDA code references; includes jumps as well as calls",
+        "reference_scope": "Only the requested depth and direction; not a whole-program call graph.",
+        "continuation": (
+            "Inspect boundary nodes as new roots, or use read-only IDAPython "
+            "for the unresolved neighborhood."
+        ),
     }
 
 
@@ -3036,8 +3130,17 @@ def inspect_call_direction(address, direction, limit=120):
     if not result.get("ok"):
         return result
     direction = str(direction or "both").lower()
+    metadata = {
+        key: result[key]
+        for key in (
+            "edge_semantics", "counts_are_returned_rows", "possibly_truncated",
+            "callers_possibly_truncated", "callees_possibly_truncated", "continuation",
+        )
+        if key in result
+    }
     if direction == "callers":
         return {
+            **metadata,
             "ok": True,
             "address": result.get("address"),
             "function": result.get("function"),
@@ -3047,6 +3150,7 @@ def inspect_call_direction(address, direction, limit=120):
         }
     if direction == "callees":
         return {
+            **metadata,
             "ok": True,
             "address": result.get("address"),
             "function": result.get("function"),
@@ -3065,12 +3169,13 @@ def inspect_global_users(address, size=256, limit=120):
     data_refs = query_data_refs(ea, limit)
     users = {}
     for collection in (xrefs.get("refs_to") or [], data_refs.get("refs_to") or []):
-        if not isinstance(collection, dict):
-            continue
-        func = collection.get("function")
-        if not isinstance(func, dict) or not func.get("address"):
-            continue
-        users[func["address"]] = func
+        for reference in collection:
+            if not isinstance(reference, dict):
+                continue
+            func = reference.get("function")
+            if not isinstance(func, dict) or not func.get("address"):
+                continue
+            users[func["address"]] = func
     return {
         "ok": True,
         "address": _hex(ea),
@@ -3081,6 +3186,10 @@ def inspect_global_users(address, size=256, limit=120):
         "function_pointer_refs": render_function_pointer_refs(ea, limit),
         "user_functions": [users[key] for key in sorted(users)],
         "user_function_count": len(users),
+        "counts_are_returned_rows": True,
+        "possibly_truncated": bool(
+            xrefs.get("possibly_truncated") or data_refs.get("possibly_truncated")
+        ),
     }
 
 
@@ -3197,7 +3306,7 @@ def execute_task(task, *, input_file_path=None):
     if kind == "xrefs_to_field":
         return xrefs_to_field(
             target or task.get("name"),
-            offset=task.get("offset") or task.get("field_offset") or task.get("member_offset"),
+            offset=next((task[key] for key in ("offset", "field_offset", "member_offset") if task.get(key) is not None), None),
             limit=limit or 120,
         )
     if kind == "find_paths":

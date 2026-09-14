@@ -126,8 +126,30 @@ def _call_args(expr: Any, limit: int) -> list[str]:
     return args
 
 
+def _user_prototype_argument_names(cfunc: Any) -> dict[int, str] | None:
+    """Map native argument indexes to names from an explicitly applied prototype."""
+    try:
+        import ida_nalt
+        import ida_typeinf
+
+        if not ida_nalt.is_userti(cfunc.entry_ea):
+            return {}
+        tif = ida_typeinf.tinfo_t()
+        details = ida_typeinf.func_type_data_t()
+        if not ida_nalt.get_tinfo(tif, cfunc.entry_ea) or not tif.get_func_details(details):
+            return None
+        indexes = list(cfunc.argidx)
+        if len(indexes) != len(details):
+            return None
+        return {int(index): str(argument.name) for index, argument in zip(indexes, details)
+                if argument.name}
+    except Exception:
+        return None
+
+
 def _record_lvars(cfunc: Any, limit: int) -> list[dict[str, Any]]:
     lvars = []
+    prototype_names = _user_prototype_argument_names(cfunc)
     try:
         raw_lvars = list(cfunc.lvars)
     except Exception:
@@ -154,15 +176,22 @@ def _record_lvars(cfunc: Any, limit: int) -> list[dict[str, Any]]:
             if has_user_type_value is not None
             else None
         )
+        prototype_name_matches = (
+            prototype_names.get(index) == str(getattr(lvar, "name", ""))
+            if is_arg and prototype_names is not None else None
+        )
         lvars.append({
             "index": index,
             "name": str(getattr(lvar, "name", "") or ""),
             "type": type_text,
             "is_arg": is_arg,
             "has_user_name": has_user_name,
+            "name_from_user_prototype": prototype_name_matches,
             "name_provenance": (
                 "user"
                 if has_user_name is True
+                else "user_prototype"
+                if prototype_name_matches is True
                 else "not_user_supplied"
                 if has_user_name is False
                 else "unknown"
@@ -266,8 +295,10 @@ def _disassembly_patterns(func_ea: int, limit: int) -> tuple[list[str], list[dic
                     "text": _clean(idc.generate_disasm_line(head, 0) or ""),
                 })
             for op_index in range(6):
+                if idc.get_operand_type(head, op_index) != idc.o_imm:
+                    continue
                 value = idc.get_operand_value(head, op_index)
-                if value and value != idc.BADADDR and value not in seen_constants:
+                if value != idc.BADADDR and value not in seen_constants:
                     seen_constants.add(value)
                     constants.append(_hex(value))
                 if len(constants) >= limit:

@@ -1,9 +1,7 @@
-#!/usr/bin/env python3
-"""Run a read-only, project-scale semantic coverage review on a project copy."""
+"""Build evidence packets for independent review and coverage reconciliation."""
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -19,39 +17,16 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from verified_ida.commands.analyze import (  # noqa: E402
-    REQUIRED_AGENTS_SDK,
-    ToolInvocationState,
-    _function_tools,
-    _observable_hooks,
-)
-from verified_ida.adapter import VerifiedIdaToolAdapter  # noqa: E402
+from verified_ida.commands.analyze import REQUIRED_AGENTS_SDK  # noqa: E402
 from verified_ida.analysis_feedback import (  # noqa: E402
     measure_type_application,
     model_created_type_names,
 )
-from verified_ida.audit import (  # noqa: E402
-    ObservableTrace,
-    aggregate_usage,
-    event_counts,
-    write_walkthrough,
-)
 from verified_ida.contracts import VERIFIED_STATUSES, canonical_json  # noqa: E402
 from verified_ida.journal import operation_surface_identity  # noqa: E402
 from verified_ida.runtime import VerifiedIdaRuntime  # noqa: E402
-from verified_ida.source_provenance import describe_source  # noqa: E402
 
 
-REVIEW_PROMPTS = {
-    "narrative_v1": (
-        ROOT / "prompts" / "project_review" /
-        "verified_ida_project_coverage_review_v1.md"
-    ),
-    "structural_v2": (
-        ROOT / "prompts" / "project_review" /
-        "verified_ida_structural_review_v2.md"
-    ),
-}
 READ_ONLY_REVIEW_TOOLS = {
     "read_reversing_log",
     "describe_ida_capabilities",
@@ -74,27 +49,6 @@ READ_ONLY_REVIEW_TOOLS = {
     "switch_ida_component",
     "review_analysis_closure",
 }
-
-
-def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project-dir", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument(
-        "--model", default=os.environ.get("ANALYSIS_MODEL", "gpt-5.6-sol")
-    )
-    parser.add_argument(
-        "--reasoning-effort",
-        choices=["none", "minimal", "low", "medium", "high", "xhigh"],
-        default="xhigh",
-    )
-    parser.add_argument("--max-agent-turns", type=int, default=200)
-    parser.add_argument(
-        "--review-mode",
-        choices=sorted(REVIEW_PROMPTS),
-        default="narrative_v1",
-    )
-    return parser.parse_args(argv)
 
 
 def _environment() -> dict[str, Any]:
@@ -210,39 +164,6 @@ def _attention_summary(runtime: VerifiedIdaRuntime) -> dict[str, Any]:
     }
 
 
-def _semantic_states(runtime: VerifiedIdaRuntime) -> dict[str, dict[str, Any]]:
-    states: dict[str, dict[str, Any]] = {}
-    for component in runtime.journal.components():
-        component_id = str(component["component_id"])
-        checkpoint = runtime.journal.latest_checkpoint(component_id) or {}
-        details = dict(checkpoint.get("details") or {})
-        path_text = str(details.get("semantic_export_path") or "")
-        path = Path(path_text) if path_text else None
-        if path is None or not path.is_file():
-            revision = int(checkpoint.get("revision") or 0)
-            matches = sorted(
-                (runtime.workspace / "semantic_checkpoints" / component_id).glob(
-                    "revision-%d-*.json" % revision
-                )
-            )
-            path = matches[-1] if matches else None
-        if path is None or not path.is_file():
-            states[component_id] = {}
-            continue
-        document = json.loads(path.read_text(encoding="utf-8"))
-        states[component_id] = dict(document.get("state") or {})
-    return states
-
-
-def _verified_current_operations(runtime: VerifiedIdaRuntime) -> list[dict[str, Any]]:
-    rows = []
-    for operation in runtime.journal.current_operations():
-        receipt = dict(operation.get("receipt") or {})
-        if receipt.get("status") in VERIFIED_STATUSES:
-            rows.append(operation)
-    return rows
-
-
 def _function_maps(
     states: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, dict[str, dict[str, Any]]]:
@@ -309,15 +230,17 @@ def _claim_risk_candidates(
             reasons = [
                 "A model-created named type can propagate one interpretation across many functions."
             ]
-            if not int(measurement.get("measured_use_count") or 0):
+            if measurement.get("status") == "declaration_only_currently":
                 reasons.append(
                     "No current measured semantic surface uses this named type."
                 )
+            elif not measurement.get("measurement_complete"):
+                reasons.append("Type-use measurement is incomplete; absence is not established.")
             candidates.append({
                 "candidate_id": "claim-type-%s-%s" % (component_id, name),
                 "tier": (
                     "A1"
-                    if not int(measurement.get("measured_use_count") or 0)
+                    if measurement.get("status") == "declaration_only_currently"
                     else "A2"
                 ),
                 "kind": "named_type_support",
@@ -583,31 +506,6 @@ def _support_boundary_candidates(
     }
 
 
-def _structural_frontier(
-    runtime: VerifiedIdaRuntime,
-    closure_result: Mapping[str, Any],
-) -> dict[str, Any]:
-    states = _semantic_states(runtime)
-    functions = _function_maps(states)
-    operations = _verified_current_operations(runtime)
-    return {
-        "schema": "verified_ida.structural_review_frontier.v1",
-        "claim_risk": _claim_risk_candidates(
-            runtime, states, functions, operations
-        ),
-        "support_boundary": _support_boundary_candidates(
-            runtime, closure_result, functions, operations
-        ),
-        "excluded_signals": [
-            "anonymous status alone",
-            "function size alone",
-            "component size or attention imbalance alone",
-            "model self-confidence",
-            "hidden benchmark or expert data",
-        ],
-    }
-
-
 def _deterministic_preflight_from_state(
     states: Mapping[str, Mapping[str, Any]],
     operations: list[dict[str, Any]],
@@ -657,19 +555,28 @@ def _deterministic_preflight_from_state(
                 ) or {}
             )
             uses = list(prototype_surface.get("examples") or [])
-            no_prototype_use = int(prototype_surface.get("count") or 0) == 0
+            use_count = int(prototype_surface.get("count") or 0)
+            measurement_complete = (
+                measurement.get("measurement_complete") is True
+                and isinstance((states.get(component_id) or {}).get("functions"), list)
+            )
+            no_prototype_use = measurement_complete and use_count == 0
             type_facts.append({
                 "fact_id": "type-prototype-use-%s-%s" % (component_id, name),
                 "fact_class": "named_type_prototype_application",
                 "component_id": component_id,
                 "type_name": name,
                 "type_kind": type_kind,
-                "current_function_prototype_use_count": len(uses),
+                "current_function_prototype_use_count": use_count,
                 "current_function_prototype_uses": uses[:24],
+                "examples_truncated": use_count > len(uses[:24]),
+                "measurement_complete": measurement_complete,
+                "count_is_lower_bound": not measurement_complete,
                 "measured_status": (
                     "no_current_function_prototype_use"
                     if no_prototype_use
-                    else "used_by_current_function_prototype"
+                    else "used_by_current_function_prototype" if use_count
+                    else "measurement_incomplete"
                 ),
                 "direct_application_gap": (
                     no_prototype_use and type_kind not in {"enum", "typedef"}
@@ -769,15 +676,6 @@ def _deterministic_preflight_from_state(
     }
 
 
-def build_deterministic_preflight(
-    runtime: VerifiedIdaRuntime,
-) -> dict[str, Any]:
-    return _deterministic_preflight_from_state(
-        _semantic_states(runtime),
-        runtime.journal.current_operations(),
-    )
-
-
 def _review_notebook_context(
     closure_result: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -799,70 +697,6 @@ def _review_notebook_context(
     return {
         "document_digest": notebook.get("document_digest"),
         "current_state": selected,
-    }
-
-
-def build_staged_review_packets(
-    runtime: VerifiedIdaRuntime,
-    closure_result: Mapping[str, Any],
-) -> dict[str, dict[str, Any]]:
-    """Build independent claim and coverage packets from generic signals."""
-
-    states = _semantic_states(runtime)
-    model_components = runtime.list_components()["components"]
-    functions = _function_maps(states)
-    operations = runtime.journal.current_operations()
-    verified_operations = [
-        row for row in operations
-        if dict(row.get("receipt") or {}).get("status") in VERIFIED_STATUSES
-    ]
-    closure_packet = dict(closure_result.get("packet") or {})
-    preflight = _deterministic_preflight_from_state(states, operations)
-    common = {
-        "objective": runtime.project_objective,
-        "review_contract": {
-            "read_only": True,
-            "current_narrative_is_evidence_not_truth": True,
-            "inventory_counts_are_not_completion_quotas": True,
-            "report_evidence_refs": "current_live_citations_only",
-            "historical_evidence_refs": "provenance_only_not_citeable",
-        },
-        "components": model_components,
-        "notebook": _review_notebook_context(closure_result),
-    }
-    claim_packet = {
-        "schema": "verified_ida.staged_claim_review.packet.v1",
-        **common,
-        "deterministic_preflight": preflight,
-        "claim_risk": _claim_risk_candidates(
-            runtime, states, functions, verified_operations
-        ),
-    }
-    coverage_packet = {
-        "schema": "verified_ida.staged_coverage_review.packet.v1",
-        **common,
-        "attention": _attention_summary(runtime),
-        "support_boundary": _support_boundary_candidates(
-            runtime, closure_result, functions, verified_operations
-        ),
-        "review_candidates": dict(
-            closure_packet.get("review_candidates") or {}
-        ),
-        "excluded_signals": [
-            "anonymous status alone",
-            "function size alone",
-            "component size or attention imbalance alone",
-            "model self-confidence",
-        ],
-    }
-    for packet in (claim_packet, coverage_packet):
-        packet["packet_sha256"] = hashlib.sha256(
-            canonical_json(packet).encode("utf-8")
-        ).hexdigest()
-    return {
-        "preflight": preflight,
-        "claim": claim_packet,
-        "coverage": coverage_packet,
     }
 
 
@@ -942,7 +776,15 @@ def _function_claim_candidates(
         candidates.append({
             **raw,
             "current_name": function.get("name"),
-            "current_comment": str(function.get("comment") or "")[:1600],
+            "current_comments": {
+                slot: {
+                    "text": str(function.get(field) or "")[:1600],
+                    "total_characters": len(str(function.get(field) or "")),
+                    "truncated": len(str(function.get(field) or "")) > 1600,
+                }
+                for slot, field in (("nonrepeatable", "comment"),
+                                    ("repeatable", "repeatable_comment"))
+            },
             "current_prototype": function.get("prototype"),
             "edit_kinds": kinds,
             "notebook_sections": sections,
@@ -1278,157 +1120,3 @@ def build_final_review_packets(
         "system_model": system_model,
         "artifact_coverage": artifact_coverage,
     }
-
-
-def build_review_packet(
-    runtime: VerifiedIdaRuntime,
-    closure_result: Mapping[str, Any],
-    *,
-    review_mode: str = "narrative_v1",
-) -> dict[str, Any]:
-    packet = {
-        "schema": "verified_ida.project_coverage_review.packet.v1",
-        "objective": runtime.project_objective,
-        "review_contract": {
-            "read_only": True,
-            "gold_blind": True,
-            "current_narrative_is_evidence_not_truth": True,
-            "inventory_counts_are_not_completion_quotas": True,
-        },
-        "attention": _attention_summary(runtime),
-        "analysis_closure": dict(closure_result.get("packet") or {}),
-        "review_mode": review_mode,
-    }
-    if review_mode == "structural_v2":
-        packet["structural_frontier"] = _structural_frontier(
-            runtime, closure_result
-        )
-    packet["packet_sha256"] = hashlib.sha256(
-        canonical_json(packet).encode("utf-8")
-    ).hexdigest()
-    return packet
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(list(argv or sys.argv[1:]))
-    environment = _environment()
-    source_provenance = describe_source(ida_backend="process")
-    project_dir = args.project_dir.expanduser().resolve()
-    output_dir = args.output_dir.expanduser().resolve()
-    if not (project_dir / "verified_ida.sqlite").is_file():
-        raise SystemExit("Review requires an existing Verified IDA project copy")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    from agents import Agent, ModelSettings, Runner, set_tracing_disabled  # type: ignore
-    from openai.types.shared.reasoning import Reasoning  # type: ignore
-
-    set_tracing_disabled(True)
-    runtime = VerifiedIdaRuntime.initialize(project_dir)
-    try:
-        closure_result = runtime.review_analysis_closure()
-        packet = build_review_packet(
-            runtime, closure_result, review_mode=args.review_mode
-        )
-        packet_path = output_dir / "project_coverage_packet.json"
-        packet_path.write_text(
-            json.dumps(packet, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        instructions = REVIEW_PROMPTS[args.review_mode].read_text(encoding="utf-8")
-        prompt = (
-            "Perform the project-scale semantic coverage review described in "
-            "your instructions. The host-generated review packet is:\n\n"
-            + json.dumps(packet, sort_keys=True, ensure_ascii=False)
-        )
-        segment_id = _segment_id()
-        trace = ObservableTrace(output_dir / "observable_tool_trace.jsonl")
-        trace.append(
-            "project_coverage_review_started",
-            segment_id=segment_id,
-            actor="harness",
-            model=args.model,
-            reasoning_effort=args.reasoning_effort,
-            review_mode=args.review_mode,
-            source=source_provenance,
-            environment=environment,
-            project_dir=str(project_dir),
-            packet_path=str(packet_path),
-            packet_sha256=packet["packet_sha256"],
-            allowed_tools=sorted(READ_ONLY_REVIEW_TOOLS),
-        )
-        adapter = VerifiedIdaToolAdapter(runtime)
-        tool_state = ToolInvocationState()
-        agent = Agent(
-            name="Verified IDA Project Coverage Reviewer",
-            model=args.model,
-            model_settings=ModelSettings(
-                reasoning=Reasoning(effort=args.reasoning_effort),
-                include_usage=True,
-                parallel_tool_calls=False,
-                store=False,
-                context_management=[{
-                    "type": "compaction",
-                    "compact_threshold": 200_000,
-                }],
-            ),
-            instructions=instructions,
-            tools=_function_tools(
-                adapter,
-                trace,
-                tool_state,
-                segment_id,
-                allowed_names=READ_ONLY_REVIEW_TOOLS,
-            ),
-        )
-        result = Runner.run_sync(
-            agent,
-            prompt,
-            max_turns=max(2, int(args.max_agent_turns)),
-            hooks=_observable_hooks(
-                trace,
-                runtime,
-                segment_id=segment_id,
-                compact_threshold_tokens=200_000,
-            ),
-        )
-        review = str(getattr(result, "final_output", "") or "")
-        review_path = output_dir / "review.md"
-        review_path.write_text(review.rstrip() + "\n", encoding="utf-8")
-        trace.append(
-            "project_coverage_review_completed",
-            segment_id=segment_id,
-            actor="harness",
-            review_path=str(review_path),
-            review_sha256=hashlib.sha256(review.encode("utf-8")).hexdigest(),
-        )
-        walkthrough = write_walkthrough(trace, output_dir / "walkthrough.md")
-        events, parse_errors = trace.read()
-        summary = {
-            "schema": "verified_ida.project_coverage_review.summary.v1",
-            "status": "completed",
-            "model": args.model,
-            "reasoning_effort": args.reasoning_effort,
-            "review_mode": args.review_mode,
-            "source": source_provenance,
-            "environment": environment,
-            "usage": aggregate_usage(events),
-            "event_counts": event_counts(events),
-            "trace_parse_errors": parse_errors,
-            "project_dir": str(project_dir),
-            "packet": str(packet_path),
-            "review": str(review_path),
-            "walkthrough": walkthrough,
-            "read_only_tool_surface": sorted(READ_ONLY_REVIEW_TOOLS),
-        }
-        (output_dir / "summary.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        print(json.dumps(summary, indent=2, sort_keys=True))
-        return 0
-    finally:
-        runtime.close()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

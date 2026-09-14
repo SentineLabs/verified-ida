@@ -79,6 +79,18 @@ READ_ONLY_QUERY_LIMITS = {
 }
 READ_ONLY_QUERIES = frozenset(READ_ONLY_QUERY_LIMITS)
 
+# The worker also serves these host-built typed queries. Reuse the public
+# catalog so adding a model query cannot silently bypass the worker boundary.
+READ_ONLY_SESSION_QUERIES = READ_ONLY_QUERIES | frozenset({
+    "describe_query_runtime", "survey_idb", "query_functions", "query_symbols",
+    "query_strings", "query_types", "inspect_function_summary",
+    "inspect_direct_call_edges",
+})
+RESERVED_QUERY_OPTIONS = frozenset({
+    "task_type", "kind", "target", "address", "value", "limit",
+    "component_id", "artifact", "project_id", "revision",
+})
+
 
 ADDRESS = {
     "oneOf": [
@@ -302,13 +314,14 @@ def model_tool_declarations() -> list[dict[str, Any]]:
         {
             "name": "query_ida_types",
             "description": (
-                "Query local structures and enums with explicit filters and a "
-                "uniform exact-total page with a revision-bound continuation cursor."
+                "Query local named types with explicit filters and a "
+                "uniform page with a revision-bound continuation cursor. "
+                "An incomplete scan reports a lower-bound total, not absence."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "kind": {"enum": ["all", "struct", "enum"]},
+                    "kind": {"enum": ["all", "struct", "union", "enum", "typedef"]},
                     "name_prefix": {"type": ["string", "null"]},
                     "order": {"enum": ["name", "kind"]},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 500},
@@ -369,7 +382,15 @@ def model_tool_declarations() -> list[dict[str, Any]]:
                     "component_id": component,
                     "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
                     "offset": {"type": "integer", "minimum": 0, "default": 0},
-                    "options": {"type": "object", "default": {}},
+                    "options": {
+                        "type": "object", "default": {},
+                        "description": (
+                            "Query-specific options such as size, depth, or prefix. "
+                            "Set query, target, component_id, and limit in their "
+                            "top-level fields; options cannot override host dispatch "
+                            "or artifact identity."
+                        ),
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -912,8 +933,9 @@ def model_tool_declarations() -> list[dict[str, Any]]:
         {
             "name": "decide_ida_component",
             "description": (
-                "Accept, revise, reject, or defer a structurally validated child. "
-                "Only acceptance prepares and registers a separate child IDB."
+                "Accept, revise, reject, or defer a recovered artifact. Acceptance verifies "
+                "retained bytes. Loadable artifacts get a child IDB; non-loadable data "
+                "remains linked to its parent without an IDB. Neither means analysis is complete."
             ),
             "input_schema": {
                 "type": "object",

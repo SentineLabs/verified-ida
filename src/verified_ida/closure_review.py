@@ -12,6 +12,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from .contracts import VERIFIED_STATUSES, canonical_json
+from .frontier import _user_name_state
 
 
 CLOSURE_REVIEW_SCHEMA = "verified_ida.analysis_closure_review.v1"
@@ -225,6 +226,7 @@ def build_closure_packet(
                 "type": row.get("type"),
                 "has_user_name": row.get("has_user_name"),
                 "name_provenance": row.get("name_provenance"),
+                "name_from_user_prototype": row.get("name_from_user_prototype"),
                 "has_user_type": row.get("has_user_type"),
                 "type_provenance": row.get("type_provenance"),
             }
@@ -232,7 +234,7 @@ def build_closure_packet(
             if (
                 isinstance(row, Mapping)
                 and row.get("is_arg")
-                and row.get("has_user_name") is False
+                and _user_name_state(row) is False
                 and row.get("has_user_type") is False
             )
         ]

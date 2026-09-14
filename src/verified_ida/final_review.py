@@ -11,7 +11,8 @@ from typing import Any, Iterable, Mapping
 
 from .closure_review import declared_references
 from .contracts import VERIFIED_STATUSES, canonical_json
-from .journal import VerifiedIdaJournal
+from .errors import RelationshipBindingError
+from .journal import VerifiedIdaJournal, operation_surface_identity
 from .semantic_delta import semantic_state_digest
 
 
@@ -29,6 +30,7 @@ REVIEW_TARGET_KINDS = frozenset({
     "named_type",
     "relationship",
     "local_variable",
+    "component_recovery",
 })
 
 
@@ -583,8 +585,15 @@ def canonical_review_target(
 
     target: dict[str, Any] = {"kind": kind}
     address_fields: list[str] = []
-    if kind in {"function", "address", "global"}:
+    if kind in {"function", "address", "global", "component_recovery"}:
         address_fields = ["address"]
+        if kind == "component_recovery":
+            from component_extraction import MAX_SOURCE_BYTES
+            size = raw.get("size")
+            objective = str(raw.get("analysis_objective") or "").strip()
+            if type(size) is not int or not 0 < size <= MAX_SOURCE_BYTES or not objective:
+                raise FinalReviewError("component_recovery requires bounded size and analysis_objective")
+            target.update(size=size, analysis_objective=objective)
     elif kind == "named_type":
         name = str(raw.get("name") or "").strip()
         if not name:
@@ -676,9 +685,32 @@ def bind_application_finding_targets(
     bound = dict(finding)
     targets = []
     bindings = []
+    unresolved = []
     components = {str(row["component_id"]) for row in runtime.journal.components()}
-    for original in finding_review_targets(finding):
+    collection_targets = finding.get("collection_targets") or finding_review_targets(finding)
+    bound["collection_targets"] = collection_targets
+    for original in collection_targets:
         target = dict(original.get("target") or {})
+        component = str(original["component_id"])
+        if target.get("kind") == "address":
+            inspected = runtime.inspect(
+                query="inspect_addr", target=target["address"],
+                component_id=component,
+            )
+            result = inspected.get("result") or {}
+            # Only a native item head is interchangeable with a global target.
+            # Interior bytes and function instructions retain address identity.
+            if (result.get("ok") and not result.get("function") and result.get("is_data")
+                    and result.get("item_head") == target["address"]):
+                replacement = canonical_review_target(
+                    {"kind": "global", "address": target["address"],
+                     "component_id": component}, component_ids=components,
+                )
+                replacement["native_binding_evidence_id"] = inspected["evidence_id"]
+                targets.append(replacement)
+                bindings.append({"original": original, "bound": replacement,
+                                 "reason": "current IDA-native exact data item head"})
+                continue
         if target.get("kind") != "relationship":
             targets.append(original)
             continue
@@ -691,11 +723,24 @@ def bind_application_finding_targets(
             query="inspect_function", target=target["destination_address"],
             component_id=component,
         )
-        inspected = runtime.inspect_relationship(
-            source_ref=source["target_ref"], destination_ref=destination["target_ref"],
-            relationship_kind=target["relationship_kind"],
-            callsite_address=target.get("callsite_address"),
-        )
+        try:
+            inspected = runtime.inspect_relationship(
+                source_ref=source["target_ref"], destination_ref=destination["target_ref"],
+                relationship_kind=target["relationship_kind"],
+                callsite_address=target.get("callsite_address"),
+            )
+        except RelationshipBindingError as exc:
+            # Preserve the claim, but grant no invented direct-edge authority.
+            # Endpoints allow the investigator to correct or qualify the claim.
+            endpoints = [canonical_review_target(
+                {"kind": "function", "address": target[field],
+                 "component_id": component}, component_ids=components,
+            ) for field in ("source_address", "destination_address")]
+            targets.extend(endpoints)
+            unresolved.append({"original": original, **exc.details,
+                               "endpoint_targets": endpoints,
+                               "instruction": exc.recovery})
+            continue
         reference = runtime.journal.reference(inspected["target_ref"])
         replacement = canonical_review_target(
             {**reference["target"], "component_id": component},
@@ -707,15 +752,65 @@ def bind_application_finding_targets(
             "original": original, "bound": replacement,
             "reason": "current IDA-native exact direct-call relationship",
         })
+    targets = list({row["target_id"]: row for row in targets}.values())
     bound["validated_targets"] = targets
     bound["target_ids"] = [row["target_id"] for row in targets]
     bound["application_target_bindings"] = bindings
+    bound["unresolved_relationship_bindings"] = unresolved
     return bound
+
+
+def validate_saved_application_targets(original_finding: Mapping[str, Any],
+                                       saved_finding: Mapping[str, Any], runtime: Any) -> None:
+    """Validate prior bindings without retroactively imposing new enrichment.
+
+    An old wave may have bound its callsites but retained raw data addresses.
+    Rebinding the whole wave under a newer host would change that valid history.
+    Recheck only the substitutions actually recorded, with native evidence.
+    """
+    originals = {review_target_identity(row): row for row in finding_review_targets(original_finding)}
+    expected = set(originals)
+    consumed = set()
+    for binding in saved_finding.get("application_target_bindings") or []:
+        original = binding.get("original") or {}
+        identity = review_target_identity(original)
+        if identity not in originals or identity in consumed or original != originals[identity]:
+            raise FinalReviewError("Saved application binding has no matching original target")
+        bound = binding.get("bound") or {}
+        request_target = dict(original)
+        if original["target_kind"] == "relationship":
+            request_target["target"] = {**original["target"],
+                "callsite_address": (bound.get("target") or {}).get("callsite_address")}
+        current = bind_application_finding_targets({"validated_targets": [request_target]}, runtime)
+        if {review_target_identity(row) for row in current["validated_targets"]} != {review_target_identity(bound)}:
+            raise FinalReviewError("Saved native application binding no longer validates")
+        expected.discard(identity)
+        expected.add(review_target_identity(bound))
+        consumed.add(identity)
+    for binding in saved_finding.get("unresolved_relationship_bindings") or []:
+        original = binding.get("original") or {}
+        identity = review_target_identity(original)
+        if identity not in originals or identity in consumed or original != originals[identity]:
+            raise FinalReviewError("Saved unresolved relationship has no original target")
+        current = bind_application_finding_targets({"validated_targets": [original]}, runtime)
+        endpoints = {review_target_identity(row) for row in binding.get("endpoint_targets") or []}
+        if not current["unresolved_relationship_bindings"] or endpoints != {
+            review_target_identity(row) for row in current["validated_targets"]
+        }:
+            raise FinalReviewError("Saved unresolved endpoint binding changed")
+        expected.discard(identity)
+        expected.update(endpoints)
+        consumed.add(identity)
+    saved = {review_target_identity(row) for row in finding_review_targets(saved_finding)}
+    if expected != saved:
+        raise FinalReviewError("Saved finding target identity changed")
 
 
 def _review_target_key(target: Mapping[str, Any]) -> str:
     """Return a stable review identity from one typed mutation target."""
 
+    if target.get("kind") == "component_recovery":
+        return "%s:%s" % (target["address"], target["size"])
     if str(target.get("kind") or "") == "local_variable":
         function_address = str(target.get("function_address") or "")
         if target.get("lvar_index") is not None:
@@ -752,6 +847,78 @@ def operation_review_target(operation: Mapping[str, Any]) -> tuple[str, str, str
     )
 
 
+def review_identity_authorized(identity: tuple[str, str, str],
+                              allowed: Iterable[tuple[str, str, str]]) -> bool:
+    """Component-wide permission is issued only for a proved recovered child."""
+    return identity in allowed or (identity[0], "component", identity[0]) in allowed
+
+
+def recovery_request_matches(request: Mapping[str, Any], target: Mapping[str, Any]) -> bool:
+    """Compare normalized extraction coordinates, never names or report prose."""
+    specification = target["target"]
+    if specification.get("kind") != "component_recovery":
+        return False
+    regions = request.get("source_regions") or [request.get("locator")]
+    return (
+        request.get("parent_component_id") == target["component_id"]
+        and regions == [{"kind": "idb_ea", "ea": specification["address"],
+                         "size": specification["size"]}]
+        and not (request.get("extraction") or {}).get("inputs")
+    )
+
+
+def recovered_review_children(runtime: Any, target: Mapping[str, Any]) -> list[dict[str, Any]]:
+    children = []
+    for component in runtime.journal.components():
+        provenance = component.get("provenance") or {}
+        extraction = runtime.journal.extraction(str(provenance.get("extraction_id") or ""))
+        if (extraction and extraction.get("status") == "accepted"
+                and extraction.get("child_component_id") == component["component_id"]
+                and extraction.get("artifact_sha256") == component["binary_sha256"]
+                and component.get("parent_component_id") == target["component_id"]
+                and recovery_request_matches(extraction["request"], target)):
+            children.append(component)
+    return children
+
+
+def recovered_review_artifacts(runtime: Any, targets: Iterable[Mapping[str, Any]],
+                              extraction_ids: Iterable[str] | None = None) -> list[dict[str, Any]]:
+    """Bind retained recovery bytes to finding scope, independently of an IDB."""
+    from .components import retained_artifact
+    scope = [target for target in targets if target["target_kind"] == "component_recovery"]
+    selected = None if extraction_ids is None else set(extraction_ids)
+    artifacts = []
+    for row in runtime.journal.connection.execute(
+        "SELECT extraction_id FROM extractions WHERE status = 'accepted' ORDER BY extraction_id"
+    ).fetchall():
+        if selected is not None and row["extraction_id"] not in selected:
+            continue
+        extraction = runtime.journal.extraction(row["extraction_id"])
+        if any(recovery_request_matches(extraction["request"], target) for target in scope):
+            artifacts.append(retained_artifact(extraction))
+    if selected is not None and {row["extraction_id"] for row in artifacts} != selected:
+        raise FinalReviewError("Recorded recovery is no longer accepted or does not match finding scope")
+    return artifacts
+
+
+def application_review_targets(finding: Mapping[str, Any], runtime: Any) -> list[dict[str, Any]]:
+    """Derive child authority from durable extraction receipts, including on resume."""
+    targets = finding_review_targets(finding)
+    children = {}
+    for target in targets:
+        if target["target_kind"] != "component_recovery":
+            continue
+        for child in recovered_review_children(runtime, target):
+            component_id = child["component_id"]
+            children[component_id] = {
+                "target_id": "review-child-" + component_id,
+                "component_id": component_id, "target_kind": "component",
+                "target_key": component_id, "target": {"kind": "component"},
+                "recovery_target_id": target["target_id"],
+            }
+    return targets + list(children.values())
+
+
 def evidence_matches_review_target(
     evidence: Mapping[str, Any],
     target: Mapping[str, Any],
@@ -765,6 +932,11 @@ def evidence_matches_review_target(
     evidence_key = str(evidence.get("target_key") or "")
     if (evidence_kind, evidence_key) == (target_kind, target_key):
         return True
+    if target_kind == "component":
+        return evidence_kind in {"function", "global", "named_type", "relationship", "address"}
+    if target_kind == "component_recovery":
+        return (evidence_kind in {"address", "global"}
+                and evidence_key == target["target"]["address"])
     if target_kind == "local_variable":
         function_address = str(
             dict(target.get("target") or {}).get("function_address") or ""
@@ -1084,6 +1256,7 @@ class ReviewDispositionLedger:
         self.runtime = runtime
         self.prior_operation_ids = {str(value) for value in prior_operation_ids}
         self.dispositions: dict[str, dict[str, Any]] = {}
+        self.consistency_checks: list[dict[str, Any]] = []
         self._write()
 
     @classmethod
@@ -1104,10 +1277,12 @@ class ReviewDispositionLedger:
         decisions = saved.get("dispositions") or []
         result.findings = {str(row["finding_id"]): row for row in rows}
         result.dispositions = {str(row["finding_id"]): row for row in decisions}
+        result.consistency_checks = list(saved.get("consistency_checks") or [])
         expected = {str(row["finding_id"]): dict(row) for row in findings}
         followups = {str(row["follow_up"]["finding_id"]) for row in decisions if row.get("follow_up")}
+        corrections = set(result.closure_finding_ids())
         if (len(result.findings) != len(rows) or len(result.dispositions) != len(decisions)
-                or set(result.findings) != set(expected) | followups
+                or set(result.findings) != set(expected) | followups | corrections
                 or set(result.dispositions) - set(result.findings)
                 or saved.get("finding_count") != len(rows)
                 or saved.get("disposition_count") != len(decisions)
@@ -1123,20 +1298,29 @@ class ReviewDispositionLedger:
             # will bind the exact native callsite before granting edit access.
             # Only an already-persisted enrichment needs comparison here.
             if saved_ids != original_ids:
-                bound = bind_application_finding_targets(row, runtime)
-                if {review_target_identity(target) for target in finding_review_targets(bound)} != saved_ids:
-                    raise FinalReviewError("Saved finding target identity changed: %s" % key)
+                validate_saved_application_targets(row, result.findings[key], runtime)
         for key, row in result.dispositions.items():
             if row.get("finding") != result.findings[key] or row.get("outcome") not in REVIEW_OUTCOMES:
                 raise FinalReviewError("Persisted disposition identity changed: %s" % key)
             result._validate_operations(row.get("operation_ids", []),
-                                        targets=finding_review_targets(result.findings[key]))
+                                        targets=application_review_targets(result.findings[key], runtime))
             if not row.get("evidence_refs") or any(runtime.journal.inspection(ref) is None for ref in row["evidence_refs"]):
                 raise FinalReviewError("Persisted disposition evidence is missing: %s" % key)
-            if row["outcome"] in {"accept_and_apply", "revise_and_apply"} and not row.get("operation_ids"):
+            artifacts = recovered_review_artifacts(runtime, application_review_targets(result.findings[key], runtime),
+                [item["extraction_id"] for item in row.get("recovered_artifacts", [])])
+            if artifacts != row.get("recovered_artifacts", []):
+                raise FinalReviewError("Recorded recovery identity changed: %s" % key)
+            if row["outcome"] in {"accept_and_apply", "revise_and_apply"} and not (row.get("operation_ids") or artifacts):
                 raise FinalReviewError("Applied disposition has no operations: %s" % key)
-            if row["outcome"] in {"reject", "defer", "follow_up_required"} and row.get("operation_ids"):
+            if row["outcome"] == "reject" and row.get("operation_ids"):
                 raise FinalReviewError("Unapplied disposition claims edits: %s" % key)
+        for key in corrections:
+            result._validate_saved_mismatch(key)
+        for check in result.consistency_checks:
+            if any(key not in corrections for key in check.get("mismatch_finding_ids", [])):
+                raise FinalReviewError("Consistency assessment references an unknown mismatch")
+        if corrections != {key for check in result.consistency_checks for key in check.get("mismatch_finding_ids", [])}:
+            raise FinalReviewError("Analytical mismatch has no persisted consistency assessment")
         # Validate follow-up references/cycles and inherited priorities before use.
         effective_finding_priorities(result.findings, result.dispositions)
         result._write()
@@ -1153,6 +1337,7 @@ class ReviewDispositionLedger:
             "dispositions": [
                 self.dispositions[key] for key in sorted(self.dispositions)
             ],
+            "consistency_checks": self.consistency_checks,
         }
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_text(
@@ -1160,6 +1345,107 @@ class ReviewDispositionLedger:
             encoding="utf-8",
         )
         temporary.replace(self.path)
+
+    def closure_finding_ids(self) -> list[str]:
+        return sorted(key for key, row in self.findings.items() if row.get("closure_mismatch"))
+
+    def _consistency_fingerprint(self) -> str:
+        state = {
+            "revisions": {row["component_id"]: self.runtime.journal.revision(row["component_id"])["revision"]
+                          for row in self.runtime.journal.components()},
+            "current_notebook": self.runtime.read_reversing_log(journal_limit=1).get("current_state"),
+            "dispositions": self.dispositions,
+        }
+        return hashlib.sha256(canonical_json(state).encode()).hexdigest()
+
+    def consistency_status(self) -> dict[str, Any]:
+        latest = self.consistency_checks[-1] if self.consistency_checks else {}
+        current = bool(latest) and latest.get("state_fingerprint") == self._consistency_fingerprint()
+        unresolved = list(latest.get("mismatch_finding_ids") or [])
+        # Clearing a report cannot discharge an already acknowledged finding.
+        unresolved.extend(key for key in self.closure_finding_ids()
+                          if key not in self.dispositions or self.dispositions[key]["outcome"] == "defer")
+        return {"ready": current and not unresolved, "assessment_current": current,
+                "unresolved_finding_ids": sorted(set(unresolved)),
+                "assessment_id": latest.get("assessment_id")}
+
+    def _mismatch_finding(self, mismatch: Mapping[str, Any]) -> dict[str, Any]:
+        required = {"operation_id", "related_finding_id", "rationale", "evidence_refs"}
+        if set(mismatch) != required or not str(mismatch.get("rationale") or "").strip():
+            raise FinalReviewError("Mismatch requires operation_id, related_finding_id, rationale, evidence_refs")
+        operation_id = str(mismatch["operation_id"])
+        related = str(mismatch["related_finding_id"])
+        if related not in self.dispositions:
+            raise FinalReviewError("Mismatch must cite an existing dispositioned review finding")
+        claimed = {str(op) for row in self.dispositions.values() for op in row.get("operation_ids", [])}
+        if operation_id not in claimed:
+            raise FinalReviewError("Mismatch must identify an edit already accounted for by this review")
+        operation = self.runtime.journal.operation_detail(operation_id)
+        if not operation or not operation.get("receipts") or operation["receipts"][-1]["status"] not in VERIFIED_STATUSES:
+            raise FinalReviewError("Mismatch operation has no verified receipt")
+        target = canonical_review_target({"component_id": operation["component_id"],
+                                          **operation["request"]["target"]},
+                                         component_ids={row["component_id"] for row in self.runtime.journal.components()})
+        surface = list(operation_surface_identity(operation["request"], component_id=operation["component_id"]))
+        key = "application/closure_mismatch:" + hashlib.sha256(
+            canonical_json([operation_id, related]).encode()).hexdigest()[:24]
+        return {"finding_id": key, "priority": "high", "component_id": operation["component_id"],
+                "validated_targets": [target],
+                "closure_mismatch": {**dict(mismatch), "surface_identity": surface},
+                "source_finding": {"source_finding_id": key, "source_kind": "closure_mismatch",
+                    "component_id": operation["component_id"], "validated_targets": [target],
+                    "payload": {"finding_id": key, "priority": "high", **dict(mismatch)}}}
+
+    def _validate_saved_mismatch(self, key: str) -> None:
+        row = self.findings[key]
+        mismatch = dict(row["closure_mismatch"])
+        mismatch.pop("surface_identity", None)
+        if self._mismatch_finding(mismatch) != row:
+            raise FinalReviewError("Saved analytical mismatch identity changed")
+        if not mismatch["evidence_refs"] or any(self.runtime.journal.inspection(ref) is None
+                                               for ref in mismatch["evidence_refs"]):
+            raise FinalReviewError("Saved analytical mismatch evidence is missing")
+
+    def record_consistency(self, *, rationale: str,
+                           mismatches: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+        """An explicit semantic assessment; IDA persistence alone cannot provide it.
+
+        Validate the whole report before committing any findings. Corrections
+        reuse this ledger and exact previously edited surfaces, never discovery.
+        """
+        if not str(rationale or "").strip():
+            raise FinalReviewError("Consistency rationale is required")
+        if set(self.findings) - set(self.dispositions):
+            raise FinalReviewError("Process open findings before assessing final consistency")
+        pending = {}
+        reported = []
+        current_ids = {row["operation_id"] for row in self.runtime.journal.current_operations()}
+        for mismatch in mismatches:
+            finding = self._mismatch_finding(mismatch)
+            if mismatch["operation_id"] not in current_ids:
+                raise FinalReviewError("Mismatch must cite the current operation for the affected surface")
+            self._validate_evidence(mismatch["evidence_refs"], targets=finding_review_targets(finding))
+            key = finding["finding_id"]
+            if key in pending:
+                raise FinalReviewError("Duplicate analytical mismatch")
+            pending[key] = self.findings.get(key, finding)
+            reported.append(dict(mismatch))
+        record = {"rationale": str(rationale).strip(), "mismatch_finding_ids": sorted(pending),
+                  "reported_mismatches": reported,
+                  "state_fingerprint": self._consistency_fingerprint()}
+        record["assessment_id"] = "consistency-" + hashlib.sha256(canonical_json(record).encode()).hexdigest()[:24]
+        previous_findings, previous_checks = self.findings, self.consistency_checks
+        self.findings = {**self.findings, **pending}
+        self.consistency_checks = [*self.consistency_checks, record]
+        try:
+            self._write()
+        except BaseException:
+            # A failed save cannot authorize closure from transient memory.
+            self.findings, self.consistency_checks = previous_findings, previous_checks
+            raise
+        return {**record, **self.consistency_status(),
+                "next_action": "Return now; the host schedules exact corrections or records incomplete closure."
+                               if pending else "Return; host verification follows."}
 
     def _validate_address(self, component_id: str, address: str) -> dict[str, Any]:
         response = self.runtime.inspect(
@@ -1295,7 +1581,7 @@ class ReviewDispositionLedger:
         }
 
     def _targets_for_finding(self, finding: Mapping[str, Any]) -> list[dict[str, Any]]:
-        targets = finding_review_targets(finding)
+        targets = application_review_targets(finding, self.runtime)
         if not targets:
             raise FinalReviewError(
                 "Review finding has no host-validated artifact targets"
@@ -1368,7 +1654,7 @@ class ReviewDispositionLedger:
                     "Disposition requires a verified review-stage operation: %s"
                     % operation_id
                 )
-            if operation_review_target(detail) not in allowed_identities:
+            if not review_identity_authorized(operation_review_target(detail), allowed_identities):
                 raise FinalReviewError(
                     "Disposition operation %s does not edit a finding target"
                     % operation_id
@@ -1403,6 +1689,17 @@ class ReviewDispositionLedger:
         targets = self._targets_for_finding(finding)
         evidence = self._validate_evidence(evidence_refs, targets=targets)
         operations = self._validate_operations(operation_ids, targets=targets)
+        mismatch = finding.get("closure_mismatch")
+        if mismatch:
+            if outcome_key == "follow_up_required":
+                raise FinalReviewError("Closure corrections cannot expand scope; qualify, reject, or defer the exact mismatch")
+            current_ids = {row["operation_id"] for row in self.runtime.journal.current_operations()}
+            if operations and any(
+                op["operation_id"] == mismatch["operation_id"] or op["operation_id"] not in current_ids
+                or list(operation_surface_identity(op["request"], component_id=op["component_id"])) != mismatch["surface_identity"]
+                for op in operations
+            ):
+                raise FinalReviewError("Closure correction requires a current verified replacement of the exact affected surface")
         supplied_operation_ids = {
             str(item["operation_id"]) for item in operations
         }
@@ -1419,7 +1716,7 @@ class ReviewDispositionLedger:
             for item in self.runtime.journal.current_operations()
             if str(item["operation_id"]) not in self.prior_operation_ids
             and str(item["operation_id"]) not in already_claimed
-            and operation_review_target(item) in target_identities
+            and review_identity_authorized(operation_review_target(item), target_identities)
             and dict(item.get("receipt") or {}).get("status")
             in VERIFIED_STATUSES
         }
@@ -1432,20 +1729,35 @@ class ReviewDispositionLedger:
                 "finding's targets: %s"
                 % ", ".join(missing_operations)
             )
-        if outcome_key in {"accept_and_apply", "revise_and_apply"} and not operations:
+        artifacts = recovered_review_artifacts(self.runtime, targets)
+        if outcome_key in {"accept_and_apply", "revise_and_apply"} and not (operations or artifacts):
             raise FinalReviewError(
-                "%s requires at least one new verified operation" % outcome_key
+                "%s requires a verified operation or accepted recovery" % outcome_key
             )
-        if outcome_key in {"reject", "defer"} and operations:
+        if (outcome_key in {"accept_and_apply", "revise_and_apply"}
+                or (outcome_key == "follow_up_required"
+                    and (follow_up_target or {}).get("kind") != "component_recovery")):
+            for target in targets:
+                if target["target_kind"] != "component_recovery":
+                    continue
+                if not recovered_review_artifacts(self.runtime, [target]):
+                    raise FinalReviewError(
+                        "Required recovery has no accepted artifact at the declared range; "
+                        "recover it or defer the unresolved work while retaining partial edits"
+                    )
+                for child in recovered_review_children(self.runtime, target):
+                    if not any(ev["component_id"] == child["component_id"] for ev in evidence):
+                        raise FinalReviewError(
+                            "Recovered child requires current inspection evidence; "
+                            "a new child edit is not required when its existing state is sufficient"
+                        )
+        if outcome_key == "reject" and operations:
             raise FinalReviewError(
                 "%s must not claim an applied correction" % outcome_key
             )
         follow_up = None
+        previous_findings = dict(self.findings)
         if outcome_key == "follow_up_required":
-            if operations:
-                raise FinalReviewError(
-                    "follow_up_required must not claim an applied correction"
-                )
             follow_up = self._validate_follow_up(
                 parent_finding_id=finding_key,
                 raw_target=follow_up_target,
@@ -1465,11 +1777,17 @@ class ReviewDispositionLedger:
             "operation_ids": [
                 str(item["operation_id"]) for item in operations
             ],
+            "recovered_artifacts": artifacts,
             "finding": self.findings[finding_key],
             "follow_up": follow_up,
         }
         self.dispositions[finding_key] = row
-        self._write()
+        try:
+            self._write()
+        except BaseException:
+            self.dispositions.pop(finding_key, None)
+            self.findings = previous_findings
+            raise
         return {
             "schema": "verified_ida.final_review_disposition_result.v1",
             **row,

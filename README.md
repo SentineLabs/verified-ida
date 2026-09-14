@@ -1,129 +1,72 @@
 # Verified IDA
 
-A proposed interface standard and reference harness for model-driven reverse
-engineering with IDA. The model investigates the program; the host checks that
-its changes reached the intended database state and preserves the evidence
-needed to inspect or correct the work.
+Verified IDA is a research harness for model-led reverse engineering. It helps
+a model investigate a program and record its understanding in IDA: function
+names and comments, interfaces, shared types, and relationships between
+components. The goal is a database that preserves what the investigation
+established and what remains uncertain.
 
-**Release candidate 0.2.0a11.** Not yet licensed for public distribution; see
-[license status](LICENSE_STATUS.md). This is research software, not a guarantee
-that an autonomous malware analysis is correct or exhaustive.
+The project grew out of our studies of model-led malware analysis. We saw useful
+findings left in conversation logs, annotations that overstated what the code
+did, and tools reporting success without enough information to check the result.
+Verified IDA defines a common contract for those operations and records the
+evidence, requested changes, and checked results.
 
-## The verification loop
+## How it works
+
+The model chooses what to investigate and proposes changes. The host—the code
+that mediates access to IDA—identifies the target, requires current evidence,
+applies the edit to a candidate database, and checks the result. It returns
+feedback and records the operation in a ledger. Accepted changes become part
+of the working IDB.
 
 ```mermaid
 flowchart LR
-    A[Model inspects IDA] --> B[Current evidence and target reference]
-    B --> C[Model proposes an edit]
-    C --> D[Host applies to an isolated candidate IDB]
-    D --> E{Readback and boundary checks pass?}
-    E -- Yes --> F[Promote IDB and record receipt]
-    E -- No --> G[Discard candidate and report failure]
-    F --> H[Feedback to the model]
-    G --> H
-    H --> A
+    A[Inspect code] --> B[Propose an evidence-linked edit]
+    B --> C[Apply to a candidate database]
+    C --> D{Check the result}
+    D -- Pass --> E[Save the change and its receipt]
+    D -- Fail --> F[Preserve the failure and explain why]
+    E --> G[Return feedback]
+    F --> G
+    G --> A
 ```
 
-For example, a model may rename a function but leave no explanation of its
-behavior. The rename can be mechanically verified while post-edit feedback
-still identifies the missing comment. The model can inspect the function again
-and add that explanation. Both edits and their evidence remain in the ledger;
-a fresh-process checkpoint checks that the accepted state survives reopening.
+During longer investigations, a project notebook preserves the current
+understanding and open questions as the model reduces its conversation context
+or moves into an embedded binary. A separate review command checks claims and
+looks for gaps, then returns findings to the saved investigator for correction.
 
-The [runnable example](examples/verified-edit/README.md) demonstrates this loop
-on a harmless C program, without a model or API key. It exercises the host
-contract; it does not pretend to demonstrate autonomous reasoning.
+## Worked example
 
-## What is standardized
+[Applying a recovered type](docs/worked-example.md) follows one ComRAT function
+from an anonymous parameter to a named structure field. The walkthrough shows
+the code before and after, the feedback sent to Sol, and the checks recorded
+when the change was saved.
 
-- Evidence is tied to a specific component and database revision.
-- Edits have explicit targets, requested state, outcomes, and repair information.
-- Tool success, durable application, and analytical correctness are separate.
-- Accepted analysis lives in IDA; operational provenance lives in the ledger.
-- Completion reports distinguish verified state from unresolved work.
+## What the proposed standard covers
 
-This is an IDA-specific proposal, not an industry-adopted standard or a claim of
-compatibility with other disassemblers. The reference runner uses the OpenAI
-Agents SDK. Another model runner or backend needs its own tested adapter.
+The [interface specification](docs/standard.md) defines how a model identifies
+evidence, requests edits, receives verification results, and tracks unfinished
+work. It also defines requirements for enforcing a selected investigation
+scope. The harness is the IDA reference implementation of that proposal;
+support for another disassembler would require a validated adapter.
 
-Read [the standard](docs/standard.md) for requirements and
-[the architecture](docs/architecture.md) for the implementation map.
+Verification establishes what changed in the database and whether it persisted.
+The interpretation can still be wrong, and reviewers can miss errors. The saved
+evidence and unresolved questions allow those judgments to be revisited.
 
-## Install
+## Start here
 
-The validated full-analysis environment is Linux, Python 3.10 or 3.12, IDA Pro
-9.3 with Hex-Rays, and working `unshare`, `bwrap`, GNU `timeout`, and
-`libseccomp.so.2`. You supply the IDA license. macOS support is limited; the
-restricted extraction path requires Linux.
-
-```sh
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -c constraints.txt -e .
-verified-ida --help
-```
-
-Use the source tree with an editable install; a standalone wheel is not a
-supported deployment. Repository-owned workers, prompts, and schemas are
-required. Set `IDA_PATH` to your installation directory and supply
-`OPENAI_API_KEY` through your environment before a model run. Do not commit
-credentials. `.env.example` documents variables; `.env` is not auto-loaded.
-
-## Investigate and review
-
-Use an isolated analysis machine and a clean IDB whose loader-recorded input
-hash matches the sample. Keep output outside the source tree.
-
-```sh
-verified-ida analyze \
-  --sample /analysis/input/sample.bin \
-  --clean-idb /analysis/input/clean.i64 \
-  --project-dir /analysis/output/investigation \
-  --model YOUR_AVAILABLE_MODEL
-
-verified-ida review \
-  --source-project-dir /analysis/output/investigation \
-  --run-dir /analysis/output/review \
-  --model YOUR_AVAILABLE_MODEL
-```
-
-Review is an explicit second command. It inspects disposable copies and returns
-validated findings to the saved investigation session for verified application.
-The primary project's databases remain unchanged by independent review.
-
-The outputs are the annotated component IDBs, `verified_ida.sqlite` operation
-ledger, `reversing_log.md` notebook, observable tool traces, and summaries.
-See [usage](docs/usage.md) for inputs, resumption, budgets, exports, and status
-interpretation. IDBs contain sample bytes: treat them as sensitive artifacts.
-
-## Repository map
-
-| Path | Purpose |
+| If you want to… | Read |
 | --- | --- |
-| `src/verified_ida/` | CLI, model tools, transactions, ledger, feedback, continuity, review |
-| `src/*.py` | Shared IDA and static-extraction support |
-| `scripts/` | Trusted IDA workers, isolation launchers, export and packaging utilities |
-| `prompts/` | Actual model-facing investigation and review guidance |
-| `schemas/verified_ida/` | Canonical operation, batch, and receipt contracts |
-| `docs/` | Standard, architecture, usage, validation and limits |
-| `examples/verified-edit/` | Small executable demonstration of the host contract |
+| Install, investigate a binary, review or resume a project | [User guide](docs/usage.md) |
+| Understand the contracts or find their implementation | [Interface specification and code map](docs/standard.md) |
+| Assess isolation and data-handling requirements | [Security](SECURITY.md) |
 
-Historical experiments, full regression suites, private fixtures, and release
-repair diaries are maintained separately, not included in this public candidate.
+You supply the IDA license and model access. The user guide describes the
+[supported environment and installation](docs/usage.md#requirements-and-installation).
 
-## Limits and safety
+## License
 
-Mechanical verification cannot prove that a name, comment, or recovered type
-correctly describes the malware. Some type changes cannot be verified if a
-required caller fails to decompile. Missing external payloads can leave a review
-analytically incomplete even after all available findings are processed.
-
-Optional coverage reconciliation and selected direct-call enforcement remain
-experimental; they do not enforce analysis of every function or indirect call.
-IDA workers are isolated from the network in the supported configuration. The
-harness does not launch the sample or recovered executables; bounded instruction
-emulation is a separate static-analysis facility. Isolation is not proof against
-IDA, Python, or operating-system vulnerabilities.
-
-Read [security](SECURITY.md) and [validation and limitations](docs/validation.md)
-before using the harness with untrusted input.
+[MIT](LICENSE). IDA and third-party dependencies retain their own license terms.

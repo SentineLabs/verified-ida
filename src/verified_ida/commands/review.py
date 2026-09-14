@@ -50,6 +50,9 @@ from verified_ida.final_review import (  # noqa: E402
     build_lossless_review_index,
     clone_verified_project,
     finding_review_targets,
+    application_review_targets,
+    recovery_request_matches,
+    review_identity_authorized,
     bind_application_finding_targets,
     load_current_recorded_closure,
     operation_review_target,
@@ -60,6 +63,7 @@ from verified_ida.final_review import (  # noqa: E402
 )
 from verified_ida.runtime import VerifiedIdaRuntime  # noqa: E402
 from verified_ida.review_application_state import (
+    application_configuration,
     application_baseline, application_feedback, focused_application_waves,
 )
 from verified_ida.source_provenance import describe_source  # noqa: E402
@@ -79,7 +83,6 @@ PROMPTS = {
     "claim": ROOT / "prompts" / "final_review" / "verified_ida_final_claim_lane_v1.md",
     "system_model": ROOT / "prompts" / "final_review" / "verified_ida_final_system_model_v1.md",
     "artifact_coverage": ROOT / "prompts" / "final_review" / "verified_ida_final_artifact_coverage_v1.md",
-    "guided_artifact": ROOT / "prompts" / "final_review" / "verified_ida_final_guided_artifact_v1.md",
     "planning": ROOT / "prompts" / "final_review" / "verified_ida_final_planning_v2.md",
     "application": ROOT / "prompts" / "final_review" / "verified_ida_final_application_v1.md",
     "application_reconciliation": (
@@ -129,6 +132,11 @@ APPLICATION_TOOLS = {
     "revalidate_ida_function_claim",
 }
 
+COMPONENT_REVIEW_TOOLS = {
+    "list_ida_components", "recover_ida_component", "decide_ida_component",
+    "write_static_extractor",
+}
+
 APPLICATION_RECONCILIATION_TOOLS = {
     "read_reversing_log",
     "update_reversing_log_section",
@@ -155,8 +163,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--resume-application", action="store_true",
                         help="Resume saved application and finalization; do not repeat collection.")
-    parser.add_argument("--import-legacy-baseline", action="store_true",
-                        help="Explicitly verify/import a pre-resume-contract baseline from the frozen source project.")
     parser.add_argument(
         "--model", default=os.environ.get("ANALYSIS_MODEL", "gpt-5.6-sol")
     )
@@ -177,37 +183,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "citations with current evidence. This is a runaway ceiling for "
             "the repair pass, not a one-query limit."
         ),
-    )
-    parser.add_argument(
-        "--system-guided-artifact",
-        action="store_true",
-        help="Review only selected system-model gaps and omit broad artifact inventory.",
-    )
-    parser.add_argument(
-        "--guided-system-gap-limit",
-        type=int,
-        default=1,
-        help="Maximum supported system gaps passed to system-guided artifact review.",
-    )
-    parser.add_argument(
-        "--guided-gap-id",
-        action="append",
-        default=[],
-        help=(
-            "Exact system-model gap identifier to review. Repeat to select "
-            "multiple gaps. Without this option, structured priority and gap "
-            "identifier determine selection."
-        ),
-    )
-    parser.add_argument(
-        "--questionable-control-file",
-        type=Path,
-        help="Host-only JSON control whose finding is added after semantic collection.",
-    )
-    parser.add_argument(
-        "--experimental-guided-application",
-        action="store_true",
-        help="Schedule the questionable control and guided artifact children as closed waves.",
     )
     parser.add_argument(
         "--collection-only",
@@ -236,8 +211,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ):
         if getattr(arguments, name) < 2:
             parser.error("--%s must be at least 2" % name.replace("_", "-"))
-    if arguments.import_legacy_baseline and not arguments.resume_application:
-        parser.error("--import-legacy-baseline requires --resume-application")
     if arguments.resume_application and (arguments.collection_only or arguments.prepare_only):
         parser.error("Application resumption cannot also request collection/preparation only")
     if arguments.citation_repair_max_turns < 4:
@@ -248,12 +221,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error(
             "--application-no-progress-max-responses must be at least 4"
         )
-    if arguments.guided_system_gap_limit < 1:
-        parser.error("--guided-system-gap-limit must be at least 1")
-    if arguments.experimental_guided_application and not arguments.system_guided_artifact:
-        parser.error("--experimental-guided-application requires --system-guided-artifact")
-    if arguments.experimental_guided_application and not arguments.questionable_control_file:
-        parser.error("--experimental-guided-application requires --questionable-control-file")
     return arguments
 
 
@@ -313,228 +280,6 @@ def _candidate_count(packet: Mapping[str, Any]) -> int:
         if isinstance(items, list):
             return len(items)
     return 0
-
-
-def _select_guided_system_gaps(
-    report: Mapping[str, Any],
-    *,
-    limit: int,
-    gap_ids: Iterable[str] = (),
-) -> list[dict[str, Any]]:
-    """Select a small, explicit system-review frontier for artifact mapping."""
-
-    priority_order = {"high": 0, "medium": 1, "low": 2}
-    candidates = [
-        dict(row) for row in (report.get("supported_gaps") or [])
-        if isinstance(row, Mapping)
-    ]
-    by_id: dict[str, dict[str, Any]] = {}
-    for row in candidates:
-        gap_id = str(row.get("gap_id") or "").strip()
-        if not gap_id:
-            raise FinalReviewError(
-                "System-guided artifact review requires every gap to have gap_id"
-            )
-        if gap_id in by_id:
-            raise FinalReviewError(
-                "System-guided artifact review received duplicate gap_id %s"
-                % gap_id
-            )
-        by_id[gap_id] = row
-
-    requested = [str(value).strip() for value in gap_ids if str(value).strip()]
-    if len(requested) != len(set(requested)):
-        raise FinalReviewError("Guided gap identifiers must be unique")
-    if requested:
-        missing = [value for value in requested if value not in by_id]
-        if missing:
-            raise FinalReviewError(
-                "Unknown guided system gap identifier(s): %s"
-                % ", ".join(missing)
-            )
-        if len(requested) > int(limit):
-            raise FinalReviewError(
-                "Requested %d guided gaps but the configured limit is %d"
-                % (len(requested), int(limit))
-            )
-        return [by_id[value] for value in requested]
-
-    candidates.sort(key=lambda row: (
-        priority_order.get(str(row.get("priority") or "low"), 9),
-        str(row.get("gap_id") or ""),
-    ))
-    selected = candidates[: int(limit)]
-    if not selected:
-        raise FinalReviewError(
-            "System-guided artifact review found no supported system gap"
-        )
-    return selected
-
-
-def _guided_artifact_packet(
-    base_packet: Mapping[str, Any],
-    system_report: Mapping[str, Any],
-    *,
-    limit: int,
-    gap_ids: Iterable[str] = (),
-) -> dict[str, Any]:
-    """Remove broad inventory and expose only host-selected system gaps."""
-
-    selected = _select_guided_system_gaps(
-        system_report, limit=limit, gap_ids=gap_ids
-    )
-    packet = {
-        "schema": "verified_ida.system_guided_artifact.packet.v1",
-        "objective": base_packet.get("objective"),
-        "review_contract": base_packet.get("review_contract"),
-        "components": base_packet.get("components"),
-        "notebook": base_packet.get("notebook"),
-        "selected_system_gaps": selected,
-        "guidance_contract": {
-            "selected_gap_count": len(selected),
-            "unrelated_project_frontier_omitted": True,
-            "atomic_child_findings_required": True,
-            "parent_gap_id_required": True,
-            "system_gaps_are_navigation_not_application_obligations": True,
-        },
-    }
-    packet["packet_sha256"] = _json_sha256(packet)
-    return packet
-
-
-def _load_questionable_control(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Load a negative-control finding while keeping its expectation host-only."""
-
-    source = path.expanduser().resolve()
-    raw = json.loads(source.read_text(encoding="utf-8"))
-    finding = dict(raw.get("finding") or {})
-    expected = dict(raw.get("host_expectation") or {})
-    ReviewFinding.model_validate(finding)
-    if not expected:
-        raise FinalReviewError("Questionable control is missing host_expectation")
-    return finding, {
-        "schema": "verified_ida.questionable_control_expectation.v1",
-        "source": str(source),
-        "finding_id": finding["finding_id"],
-        "expected": expected,
-    }
-
-
-def _experimental_guided_plan(
-    review_index: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Schedule one control and atomic children of one system gap as waves."""
-
-    findings = [dict(row) for row in review_index.get("source_findings") or []]
-    control_ids = [
-        str(row["source_finding_id"])
-        for row in findings
-        if str(row.get("source") or "") == "claim/experimental_control"
-    ]
-    guided_rows = [
-        row for row in findings
-        if row.get("source_kind") == "artifact"
-        and str(dict(row.get("payload") or {}).get("parent_gap_id") or "")
-    ]
-    if len(control_ids) != 1:
-        raise FinalReviewError(
-            "Experimental guided application requires exactly one questionable control"
-        )
-    if not guided_rows:
-        raise FinalReviewError(
-            "Experimental guided application requires at least one guided artifact child"
-        )
-    parent_ids = {
-        str(dict(row.get("payload") or {}).get("parent_gap_id") or "")
-        for row in guided_rows
-    }
-    if len(parent_ids) != 1:
-        raise FinalReviewError(
-            "Guided artifact children must resolve one selected system gap"
-        )
-
-    guided_ids = [str(row["source_finding_id"]) for row in guided_rows]
-    candidate_ids = [
-        str(row["source_finding_id"])
-        for row in findings
-        if row.get("application_eligibility") == "candidate"
-    ]
-    scheduled = list(dict.fromkeys([
-        *control_ids,
-        *guided_ids,
-        *candidate_ids,
-    ]))
-    system_parent_ids = {
-        str(row["source_finding_id"]): str(
-            dict(row.get("payload") or {}).get("gap_id") or ""
-        )
-        for row in findings if row.get("source_kind") == "system_gap"
-    }
-    parent_gap = next(iter(parent_ids))
-    parent_source = next(
-        (
-            source_id for source_id, gap_id in system_parent_ids.items()
-            if gap_id == parent_gap
-        ),
-        None,
-    )
-    dispositions = []
-    for row in findings:
-        source_id = str(row["source_finding_id"])
-        payload = dict(row.get("payload") or {})
-        if row.get("application_eligibility") == "candidate":
-            route = "application_wave"
-        else:
-            route = "backlog_parent"
-        related = []
-        if payload.get("parent_gap_id") == parent_gap and parent_source:
-            related.append(parent_source)
-        if source_id == parent_source:
-            related.extend(
-                str(child["source_finding_id"]) for child in guided_rows
-            )
-        dispositions.append({
-            "source_finding_id": source_id,
-            "route": route,
-            "priority": str(payload.get("priority") or "medium"),
-            "related_source_finding_ids": sorted(set(related)),
-            "rationale": (
-                "Scheduled concrete verification target."
-                if route == "application_wave"
-                else "Retained as a system-model navigation parent."
-            ),
-        })
-    waves = [{
-        "wave_id": "wave-questionable-control",
-        "source_finding_ids": control_ids,
-        "rationale": "Verify that an intentionally questionable claim can be rejected or revised.",
-    }]
-    for index, row in enumerate(guided_rows, start=1):
-        waves.append({
-            "wave_id": "wave-guided-artifact-%02d" % index,
-            "source_finding_ids": [str(row["source_finding_id"])],
-            "rationale": (
-                "Verify one atomic artifact child of system gap %s." % parent_gap
-            ),
-        })
-    already_scheduled = set(control_ids) | set(guided_ids)
-    for index, source_id in enumerate(
-        (value for value in scheduled if value not in already_scheduled),
-        start=1,
-    ):
-        waves.append({
-            "wave_id": "wave-additional-candidate-%02d" % index,
-            "source_finding_ids": [source_id],
-            "rationale": "Verify one additional concrete review finding.",
-        })
-    return _validate_planning_report(review_index, {
-        "assessment": (
-            "Experimental plan schedules one questionable control and atomic "
-            "artifact children of one selected system gap."
-        ),
-        "dispositions": dispositions,
-        "proposed_waves": waves,
-    })
 
 
 def _field_evidence_refs(
@@ -1597,8 +1342,8 @@ def _disposition_tool(
                     "type": type(exc).__name__,
                     "message": str(exc),
                     "recovery": (
-                        "Inspect current IDA state, use current evidence, apply "
-                        "a verified edit when accepting, and retry only this disposition."
+                        "Use current evidence and account for verified edits or accepted recovery. "
+                        "Defer unresolved work with its partial edits when necessary; retry only this disposition."
                     ),
                 },
             }
@@ -1618,8 +1363,8 @@ def _disposition_tool(
         name="record_review_disposition",
         description=(
             "Record the current-evidence disposition of one current-wave final-review "
-            "finding. Accept/revise requires a review-stage verified operation (including "
-            "a saved edit from an earlier application attempt); reject/defer "
+            "finding. Accept/revise accounts for verified edits or an accepted recovery. "
+            "Defer may retain verified partial edits without claiming resolution; reject "
             "requires current inspection evidence and no claimed operation. When "
             "current evidence identifies one different artifact that must be checked, "
             "follow_up_required records its typed identity and fresh evidence for a "
@@ -1666,9 +1411,12 @@ def _disposition_tool(
                                 "named_type",
                                 "relationship",
                                 "local_variable",
+                                "component_recovery",
                             ]
                         },
                         "address": {"type": "string", "minLength": 1},
+                        "size": {"type": "integer", "minimum": 1, "maximum": 67108864},
+                        "analysis_objective": {"type": "string", "minLength": 1},
                         "name": {"type": "string", "minLength": 1},
                         "function_address": {"type": "string", "minLength": 1},
                         "lvar_index": {"type": "integer", "minimum": 0},
@@ -1708,7 +1456,7 @@ def _application_wave_mechanical_issues(
         row
         for row in runtime.journal.mechanical_issues()
         if int(row["operation_rowid"]) > operation_cutoff
-        and operation_review_target(row) in allowed_target_identities
+        and review_identity_authorized(operation_review_target(row), allowed_target_identities)
     ]
 
 
@@ -1722,12 +1470,43 @@ class _ApplicationWaveToolAdapter:
         allowed_component_ids: set[str],
         allowed_target_identities: set[tuple[str, str, str]],
         progress_guidance: Any = None,
+        finding_rows: Iterable[Mapping[str, Any]] = (),
     ):
         self.adapter = adapter
         self.runtime = adapter.runtime
-        self.allowed_component_ids = set(allowed_component_ids)
-        self.allowed_target_identities = set(allowed_target_identities)
+        self.allowed_component_ids = allowed_component_ids
+        self.allowed_target_identities = allowed_target_identities
         self.progress_guidance = progress_guidance
+        self.finding_rows = list(finding_rows)
+
+    def _refresh_children(self) -> None:
+        for finding in self.finding_rows:
+            for target in application_review_targets(finding, self.runtime):
+                self.allowed_component_ids.add(target["component_id"])
+                self.allowed_target_identities.add(review_target_identity(target))
+
+    def _check_recovery(self, request: Mapping[str, Any]) -> None:
+        from component_extraction import normalize_semantic_request
+        normalized = normalize_semantic_request({
+            **dict(request),
+            **({"locators": request["source_regions"]} if request.get("source_regions") else {}),
+        })
+        targets = [target for finding in self.finding_rows
+                   for target in finding_review_targets(finding)
+                   if recovery_request_matches(normalized, target)]
+        if not targets:
+            raise FinalReviewError(
+                "Recovery must use the exact parent range of a component_recovery target; "
+                "additional input regions require a separate declared recovery finding"
+            )
+        from verified_ida.final_review import evidence_matches_review_target
+        evidence = [self.runtime.journal.inspection(str(ref))
+                    for ref in normalized["evidence_refs"]]
+        revision = self.runtime.journal.revision(normalized["parent_component_id"])["revision"]
+        if not any(row and row["revision"] == revision and any(
+            evidence_matches_review_target(row, target) for target in targets
+        ) for row in evidence):
+            raise FinalReviewError("Recovery requires current inspection evidence at the declared range")
 
     @property
     def schemas(self) -> Mapping[str, Any]:
@@ -1740,6 +1519,17 @@ class _ApplicationWaveToolAdapter:
         arguments: Mapping[str, Any] | None = None,
     ) -> Any:
         request = dict(arguments or {})
+        self._refresh_children()
+        if name == "recover_ida_component":
+            self._check_recovery(request)
+        if name == "decide_ida_component":
+            extraction = self.runtime.journal.extraction(str(request.get("extraction_id") or ""))
+            if not extraction:
+                raise FinalReviewError("Unknown extraction")
+            self._check_recovery({**extraction["request"],
+                                  "evidence_refs": request.get("evidence_refs") or []})
+            if request.get("decision") == "revise":
+                self._check_recovery(request.get("next_request") or {})
         requested_component = request.get("component_id")
         if name == "switch_ida_component":
             requested_component = request.get("component_id")
@@ -1768,12 +1558,20 @@ class _ApplicationWaveToolAdapter:
                 "component_id": reference.get("component_id"),
                 "request": {"target": target},
             })
-            if identity not in self.allowed_target_identities:
+            if not review_identity_authorized(identity, self.allowed_target_identities):
                 raise FinalReviewError(
                     "The edit target is not declared by a current-wave finding; "
                     "record a typed follow_up_required disposition if another "
                     "artifact must change"
                 )
+            corrections = [row["closure_mismatch"] for row in self.finding_rows if row.get("closure_mismatch")]
+            if corrections:
+                from verified_ida.journal import operation_surface_identity
+                surface = list(operation_surface_identity(
+                    {"kind": request.get("kind"), "target": target, "desired": request.get("value") or {}},
+                    component_id=str(reference.get("component_id") or "")))
+                if not any(surface == row["surface_identity"] for row in corrections):
+                    raise FinalReviewError("Closure correction may edit only the recorded surface, including its comment slot")
         if name in {
             "read_ida_call_flow_scope",
             "disposition_ida_call_flow_node",
@@ -1789,7 +1587,7 @@ class _ApplicationWaveToolAdapter:
                 "function",
                 str(scope["root_address"]),
             )
-            if identity not in self.allowed_target_identities:
+            if not review_identity_authorized(identity, self.allowed_target_identities):
                 raise FinalReviewError(
                     "The call-flow scope is not rooted in a current-wave finding target"
                 )
@@ -1803,6 +1601,7 @@ class _ApplicationWaveToolAdapter:
                 % ", ".join(sorted(self.allowed_component_ids))
             )
         result = self.adapter.invoke(name, request)
+        self._refresh_children()
         guidance = (
             self.progress_guidance(name)
             if self.progress_guidance is not None
@@ -1826,7 +1625,7 @@ class _ApplicationWaveProgress:
         self.runtime = runtime
         self.ledger = ledger
         self.no_progress_limit = int(no_progress_limit)
-        self.allowed_target_identities = set(allowed_target_identities)
+        self.allowed_target_identities = allowed_target_identities
         self.active_finding_ids = set(active_finding_ids)
         self.active_no_progress_limit = int(no_progress_limit)
         self.response_count = 0
@@ -1839,7 +1638,7 @@ class _ApplicationWaveProgress:
             str(row.get("operation_id"))
             for row in self.runtime.journal.current_operations()
             if (
-                operation_review_target(row) in self.allowed_target_identities
+                review_identity_authorized(operation_review_target(row), self.allowed_target_identities)
                 and dict(row.get("receipt") or {}).get("status")
                 in VERIFIED_STATUSES
             )
@@ -1876,22 +1675,24 @@ class _ApplicationWaveProgress:
             )
 
     def model_guidance(self, tool_name: str) -> dict[str, Any] | None:
-        if self.active_finding_ids:
-            return application_feedback(self.ledger, sorted(self.active_finding_ids))
+        feedback = (application_feedback(self.ledger, sorted(self.active_finding_ids))
+                    if self.active_finding_ids else None)
         no_progress = self.response_count - self.last_progress_response
         remaining = self.active_no_progress_limit - no_progress
         if remaining > 4 or remaining <= 0:
-            return None
-        return {
+            return feedback
+        warning = {
             "schema": "verified_ida.application_wave_progress.v1",
             "no_progress_responses": no_progress,
             "responses_remaining_before_stop": remaining,
             "ordinary_inspection_does_not_reset_window": True,
             "required_decision": (
                 "Apply a supported edit or record a disposition. If another "
-                "artifact must change, record one exact typed follow-up target."
+                "artifact must change, record one exact typed follow-up target. "
+                "Do not make an unsupported edit merely to avoid the pause."
             ),
         }
+        return {**feedback, "safety_warning": warning} if feedback else warning
 
 
 def _run_application_wave(
@@ -1914,7 +1715,7 @@ def _run_application_wave(
     wave_id = str(wave["wave_id"])
     wave_finding_ids = set(str(value) for value in wave["source_finding_ids"])
     findings = [
-        (dict(finding_rows[value]) if value in ledger.dispositions else
+        (dict(finding_rows[value]) if value in ledger.dispositions or finding_rows[value].get("closure_mismatch") else
          bind_application_finding_targets(finding_rows[value], runtime))
         for value in wave["source_finding_ids"]
     ]
@@ -1926,7 +1727,7 @@ def _run_application_wave(
     allowed_targets = [
         target
         for finding in findings
-        for target in finding_review_targets(finding)
+        for target in application_review_targets(finding, runtime)
     ]
     if not allowed_targets:
         raise FinalReviewError(
@@ -1961,6 +1762,7 @@ def _run_application_wave(
         allowed_component_ids=allowed_component_ids,
         allowed_target_identities=allowed_target_identities,
         progress_guidance=progress.model_guidance,
+        finding_rows=findings,
     )
 
     def _cap_handler(_handler_input: Any) -> RunErrorHandlerResult:
@@ -1973,12 +1775,15 @@ def _run_application_wave(
             )
         )
 
+    allowed_tools = APPLICATION_TOOLS | (COMPONENT_REVIEW_TOOLS if any(
+        target["target_kind"] == "component_recovery" for target in allowed_targets
+    ) else set())
     tools = _function_tools(
         adapter,
         trace,
         tool_state,
         segment_id,
-        allowed_names=APPLICATION_TOOLS,
+        allowed_names=allowed_tools,
     )
     tools.append(_disposition_tool(
         ledger,
@@ -2042,7 +1847,7 @@ def _run_application_wave(
         model=model,
         finding_count=len(findings),
         packet_sha256=packet["packet_sha256"],
-        allowed_tools=sorted(APPLICATION_TOOLS | {"record_review_disposition"}),
+        allowed_tools=sorted(allowed_tools | {"record_review_disposition"}),
     )
     _progress(
         "final_review_application_wave_started",
@@ -2226,7 +2031,7 @@ def _run_application_wave(
         row
         for row in runtime.journal.current_operations()
         if str(row["operation_id"]) not in ledger.prior_operation_ids
-        and operation_review_target(row) in allowed_target_identities
+        and review_identity_authorized(operation_review_target(row), allowed_target_identities)
         and dict(row.get("receipt") or {}).get("status")
         in VERIFIED_STATUSES
         and str(row["operation_id"]) not in claimed_operation_ids
@@ -2434,6 +2239,7 @@ def _run_application_reconciliation(
         segment_id,
         allowed_names=APPLICATION_RECONCILIATION_TOOLS,
     )
+    tools.append(_consistency_tool(ledger, trace, segment_id))
     notebook = runtime.read_reversing_log(journal_limit=3)
     initial_journal_digest = str(
         dict(notebook.get("journal") or {}).get("digest") or ""
@@ -2462,10 +2268,12 @@ def _run_application_reconciliation(
         "session_continuity": dict(session_state),
         "checkpoint_retries": checkpoint_retries,
         "dispositions": compact_dispositions,
+        "prior_consistency": ledger.consistency_status(),
         "closure": closure,
         "requirements": {
             "all_review_findings_already_dispositioned": True,
             "do_not_reopen_findings": True,
+            "report_existing_claim_mismatches": True,
             "do_not_edit_ida": True,
             "closure_review_updated_after_fresh_packet": True,
             "journal_checkpoint_required": True,
@@ -2478,7 +2286,8 @@ def _run_application_reconciliation(
             "done_when": (
                 "The notebook reflects every review disposition, the Closure "
                 "Review section reconciles the latest live closure packet, "
-                "and the Investigation Journal records final review closure."
+                "the Investigation Journal records final review closure, and "
+                "record_review_consistency explicitly reports agreement or exact mismatches."
             ),
             "request_ceiling_is_emergency_only": True,
         },
@@ -2514,7 +2323,10 @@ def _run_application_reconciliation(
         "notebook and live IDA state. Do not reopen a finding or make an IDA "
         "edit. Update non-closure analytical state first if it is inaccurate, "
         "then acquire a fresh closure packet, update Closure Review last, and "
-        "append one final-review journal entry. The state-restoration packet "
+        "append one final-review journal entry. Finally call record_review_consistency. "
+        "If an accepted revision contradicts an earlier IDA annotation, report "
+        "its current operation ID, related finding, and fresh inspection evidence; "
+        "a notebook note alone does not resolve it. The state-restoration packet "
         "follows:\n\n%s"
         % json.dumps(packet, sort_keys=True, ensure_ascii=False)
     )
@@ -2551,7 +2363,10 @@ def _run_application_reconciliation(
         )
         journal_updated = final_journal_digest != initial_journal_digest
         completion = runtime.complete()
-        if completion.get("may_finish") and journal_updated:
+        consistency = ledger.consistency_status()
+        if consistency["assessment_current"] and consistency["unresolved_finding_ids"]:
+            break
+        if completion.get("may_finish") and journal_updated and consistency["ready"]:
             break
         if hit_runaway_ceiling or continuation_count >= 2:
             break
@@ -2569,7 +2384,8 @@ def _run_application_reconciliation(
             "findings or edit IDA. Satisfy the exact host next action, update "
             "Closure Review against this fresh packet, and ensure the final "
             "review journal checkpoint exists. Host status:\n\n%s\n\n"
-            "Fresh closure packet:\n\n%s"
+            "Fresh closure packet:\n\n%s\n\nFinally call record_review_consistency; "
+            "report exact conflicts or an empty mismatch list with your rationale."
             % (
                 json.dumps(completion, sort_keys=True, ensure_ascii=False),
                 json.dumps(closure, sort_keys=True, ensure_ascii=False),
@@ -2581,6 +2397,10 @@ def _run_application_reconciliation(
         dict(final_notebook.get("journal") or {}).get("digest") or ""
     )
     journal_updated = final_journal_digest != initial_journal_digest
+    consistency = ledger.consistency_status()
+    mechanical_may_finish = bool(completion.get("may_finish"))
+    completion = {**completion, "review_consistency": consistency,
+                  "may_finish": mechanical_may_finish and consistency["ready"]}
     status = (
         "completed"
         if completion.get("may_finish") and journal_updated
@@ -2616,6 +2436,8 @@ def _run_application_reconciliation(
             "final_journal_digest": final_journal_digest,
         },
         "completion": completion,
+        "consistency": consistency,
+        "application_persistence_ready": mechanical_may_finish,
         "final_output": str(result.final_output or "") if result is not None else "",
         "walkthrough": walkthrough,
     }
@@ -2626,6 +2448,83 @@ def _run_application_reconciliation(
         continuation_count=continuation_count,
         total_tokens=int(summary["usage"].get("total_tokens") or 0),
     )
+    return summary
+
+
+def _consistency_tool(ledger: ReviewDispositionLedger, trace: ObservableTrace, segment_id: str) -> Any:
+    from agents import FunctionTool
+
+    async def invoke(_context: Any, arguments_json: str) -> str:
+        try:
+            arguments = json.loads(arguments_json)
+            result = {"ok": True, "result": ledger.record_consistency(**arguments)}
+        except Exception as exc:
+            result = {"ok": False, "error": {"type": type(exc).__name__, "message": str(exc),
+                      "recovery": "Use current reviewed operation IDs and fresh evidence for each affected surface. "
+                                  "Do not edit IDA here. Submit after notebook reconciliation."}}
+        trace.append("review_consistency_recorded" if result["ok"] else "review_consistency_failed",
+                     actor="model_and_host", segment_id=segment_id, tool="record_review_consistency",
+                     arguments_sha256=hashlib.sha256(arguments_json.encode()).hexdigest(), **result)
+        return json.dumps(result, sort_keys=True)
+
+    return FunctionTool(name="record_review_consistency", description=(
+        "After reconciling the notebook, explicitly assess agreement of accepted review conclusions "
+        "with current IDA annotations. Report each conflicting current review operation and the "
+        "related dispositioned finding, with fresh target evidence. An empty list asserts agreement; "
+        "an acknowledged conflict creates a blocking exact-surface correction in the existing ledger."),
+        params_json_schema={"type": "object", "required": ["rationale", "mismatches"],
+            "properties": {"rationale": {"type": "string", "minLength": 1}, "mismatches": {
+                "type": "array", "items": {"type": "object", "additionalProperties": False,
+                    "required": ["operation_id", "related_finding_id", "rationale", "evidence_refs"],
+                    "properties": {"operation_id": {"type": "string", "minLength": 1},
+                        "related_finding_id": {"type": "string", "minLength": 1},
+                        "rationale": {"type": "string", "minLength": 1},
+                        "evidence_refs": {"type": "array", "minItems": 1,
+                                          "items": {"type": "string", "minLength": 1}}}}}},
+            "additionalProperties": False}, on_invoke_tool=invoke, strict_json_schema=False)
+
+
+def _run_application_closure(*, runtime: VerifiedIdaRuntime, stage_dir: Path,
+                             ledger: ReviewDispositionLedger, model: str,
+                             reasoning_effort: str, application_session: Any,
+                             session_state: Mapping[str, Any], runaway_max_turns: int = 160,
+                             no_progress_max_responses: int = 40,
+                             reconciliation_max_turns: int = 48) -> dict[str, Any]:
+    """One consistency assessment, one frozen correction pass, one verification.
+
+    No discovery or unlimited correction loop. Further disagreements are saved
+    as blockers for an explicit resume with the same cumulative safety budget.
+    """
+    arguments = dict(runtime=runtime, ledger=ledger, model=model, reasoning_effort=reasoning_effort,
+                     application_session=application_session, session_state=session_state,
+                     runaway_max_turns=reconciliation_max_turns)
+    assessment = _run_application_reconciliation(stage_dir=stage_dir, **arguments)
+    rows = [assessment]
+    selected = [key for key in ledger.consistency_status()["unresolved_finding_ids"]
+                if key not in ledger.dispositions and key in ledger.closure_finding_ids()]
+    _write_json(stage_dir / "correction_plan.json", {"finding_ids": selected,
+                "automatic_pass_limit": 1, "uses_existing_review_budget": True})
+    final = assessment
+    if assessment.get("application_persistence_ready") and selected:
+        for index, key in enumerate(selected, 1):
+            result = _run_application_wave(
+                runtime=runtime, stage_dir=stage_dir / "corrections" / ("%02d" % index),
+                wave={"wave_id": "closure-correction-%02d" % index,
+                      "source_finding_ids": [key], "origin": "closure_mismatch"},
+                finding_rows={key: ledger.findings[key]}, ledger=ledger, model=model,
+                reasoning_effort=reasoning_effort, runaway_max_turns=runaway_max_turns,
+                no_progress_max_responses=no_progress_max_responses,
+                application_session=application_session, session_state=session_state)
+            rows.append(result)
+            if result["status"] != "completed" or ledger.dispositions.get(key, {}).get("outcome") == "defer":
+                break
+        else:
+            final = _run_application_reconciliation(stage_dir=stage_dir / "verification", **arguments)
+            rows.append(final)
+    summary = {**final, "schema": "verified_ida.review_closure_campaign.v1",
+               "selected_correction_finding_ids": selected, "stages": rows,
+               "usage": _combined_usage(rows)}
+    _write_json(stage_dir / "campaign_summary.json", summary)
     return summary
 
 
@@ -2642,7 +2541,6 @@ def _run_application_waves(
     application_session: Any = None,
     session_state: Mapping[str, Any] | None = None,
     resume: bool = False,
-    legacy_operations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     stage_dir = output_dir / "application"
     stage_dir.mkdir(parents=True, exist_ok=resume)
@@ -2654,7 +2552,10 @@ def _run_application_waves(
         _write_json(plan_path, dict(plan))
     baseline = application_baseline(
         stage_dir / "baseline.json", runtime=runtime, review_index=review_index,
-        plan=plan, resume=resume, legacy_operations=legacy_operations,
+        plan=plan, resume=resume,
+    )
+    configuration = application_configuration(
+        stage_dir, model=model, reasoning_effort=reasoning_effort, resume=resume,
     )
     attempts_dir = stage_dir / "attempts"
     attempts_dir.mkdir(exist_ok=True)
@@ -2662,6 +2563,7 @@ def _run_application_waves(
     attempt_dir.mkdir(exist_ok=False)
     _write_json(attempt_dir / "started.json", {
         "resume": resume, "source": describe_source(ida_backend="process"),
+        "configuration": configuration,
         "baseline": baseline, "component_hashes": project_component_hashes(runtime.workspace),
     })
     for name in ("dispositions.json", "summary.json", "progress.json"):
@@ -2729,7 +2631,7 @@ def _run_application_waves(
         for wave in pending_waves
         for source_id in wave.get("source_finding_ids") or []
     }
-    for follow_up_id in ledger.follow_up_finding_ids():
+    for follow_up_id in ledger.follow_up_finding_ids() + ledger.closure_finding_ids():
         if follow_up_id not in scheduled_ids:
             scheduled_ids.add(follow_up_id)
             pending_waves.append({"wave_id": "follow-up-%s" % follow_up_id.rsplit(":", 1)[-1],
@@ -2794,7 +2696,7 @@ def _run_application_waves(
         else "incomplete"
     )
     if status == "completed":
-        reconciliation = _run_application_reconciliation(
+        reconciliation = _run_application_closure(
             runtime=runtime,
             stage_dir=attempt_dir / "reconciliation",
             ledger=ledger,
@@ -2802,10 +2704,20 @@ def _run_application_waves(
             reasoning_effort=reasoning_effort,
             application_session=application_session,
             session_state=effective_session_state,
+            runaway_max_turns=runaway_max_turns,
+            no_progress_max_responses=no_progress_max_responses,
         )
         completion = dict(reconciliation.get("completion") or {})
         if reconciliation.get("status") != "completed":
             status = "incomplete"
+    disposition_summary = ledger.summary()
+    blocking_finding_ids = review_completion_blockers(ledger.findings, ledger.dispositions, plan)
+    blocking_finding_ids = sorted(set(blocking_finding_ids) | set(ledger.consistency_status()["unresolved_finding_ids"]))
+    if blocking_finding_ids:
+        status = "incomplete"
+    completed_ids.update(ledger.dispositions)
+    _write_json(progress_path, {"completed_finding_ids": sorted(completed_ids)})
+    completion = {**completion, "may_finish": status == "completed" and bool(completion.get("may_finish"))}
     effective_session_state["final_message_count"] = _session_message_count(
         runtime.workspace,
         str(effective_session_state["session_id"]),
@@ -3067,19 +2979,15 @@ def _resume_application(arguments: argparse.Namespace, lifecycle: dict[str, Any]
     review_index = _load_json(output_dir / "consolidation" / "review_index.json")
     plan = _load_json(output_dir / "application" / "execution_plan.json")
     previous = _load_json(run_dir / "summary.json")
-    application_record = _load_json(output_dir / "application" / "summary.json")
-    if (application_record.get("model") != arguments.model
-            or application_record.get("reasoning_effort") != arguments.reasoning_effort):
-        raise FinalReviewError("Resume must retain the reviewed model configuration")
-    legacy_operations = None
-    if not (output_dir / "application" / "baseline.json").exists():
-        if not arguments.import_legacy_baseline:
-            raise FinalReviewError("Use --import-legacy-baseline after preserving the stopped review")
-        database = source_project / "verified_ida.sqlite"
-        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as connection:
-            connection.row_factory = sqlite3.Row
-            legacy_operations = [dict(row) for row in connection.execute(
-                "SELECT operation_id, operation_digest FROM operations ORDER BY rowid")]
+    application_configuration(
+        output_dir / "application", model=arguments.model,
+        reasoning_effort=arguments.reasoning_effort, resume=True,
+    )
+    if not (output_dir / "application" / "baseline.json").is_file():
+        raise FinalReviewError(
+            "Saved review has no application baseline. Preserve the stopped review "
+            "and start a new review in a new run directory."
+        )
     lifecycle.update(phase="application_resume", source=describe_source(ida_backend="process"))
     runtime = VerifiedIdaRuntime.initialize(project_dir, analysis_feedback_profile="scoped")
     try:
@@ -3092,7 +3000,7 @@ def _resume_application(arguments: argparse.Namespace, lifecycle: dict[str, Any]
             model=arguments.model, reasoning_effort=arguments.reasoning_effort,
             runaway_max_turns=arguments.application_runaway_max_turns,
             no_progress_max_responses=arguments.application_no_progress_max_responses,
-            resume=True, legacy_operations=legacy_operations,
+            resume=True,
         )
         baseline = _load_json(output_dir / "application" / "baseline.json")
         prior_audit = _load_json(output_dir / "post_application_audit.json") if (output_dir / "post_application_audit.json").exists() else {}
@@ -3240,7 +3148,6 @@ def _run_stages(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> int
         stage_summaries = []
         claim_reports = []
         evidence_registry: dict[str, dict[str, Any]] = {}
-        control_expectation = None
         for lane in CLAIM_LANES:
             lifecycle["phase"] = "claim/" + lane
             packet = packets["claim_lanes"][lane]
@@ -3274,25 +3181,6 @@ def _run_stages(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> int
             stage_summaries.append(result["summary"])
             evidence_registry.update(result["evidence_registry"])
 
-        if arguments.questionable_control_file:
-            control_finding, control_expectation = _load_questionable_control(
-                arguments.questionable_control_file
-            )
-            claim_reports.append({
-                "stage": "claim",
-                "lane": "experimental_control",
-                "assessment": (
-                    "Host-seeded questionable claim for disposition-path testing."
-                ),
-                "findings": [control_finding],
-                "cleared_targets": [],
-                "deferred_questions": [],
-            })
-            _write_json(
-                output_dir / "questionable_control_expectation.json",
-                control_expectation,
-            )
-
         lifecycle["phase"] = "system_model"
         system_result = _run_readonly_review_stage(
             source_project=project_dir,
@@ -3311,23 +3199,11 @@ def _run_stages(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> int
         )
         stage_summaries.append(system_result["summary"])
         evidence_registry.update(system_result["evidence_registry"])
-        if arguments.system_guided_artifact:
-            artifact_packet = _guided_artifact_packet(
-                packets["artifact_coverage"],
-                system_result["report"],
-                limit=arguments.guided_system_gap_limit,
-                gap_ids=arguments.guided_gap_id,
-            )
-            artifact_prompt = PROMPTS["guided_artifact"]
-            artifact_lane = "system_guided_artifact"
-        else:
-            artifact_packet = {
-                **packets["artifact_coverage"],
-                "system_model_report": system_result["report"],
-            }
-            artifact_packet["packet_sha256"] = _json_sha256(artifact_packet)
-            artifact_prompt = PROMPTS["artifact_coverage"]
-            artifact_lane = "artifact_coverage"
+        artifact_packet = {
+            **packets["artifact_coverage"],
+            "system_model_report": system_result["report"],
+        }
+        artifact_packet["packet_sha256"] = _json_sha256(artifact_packet)
         _write_json(
             output_dir / "effective_artifact_coverage_packet.json",
             artifact_packet,
@@ -3335,11 +3211,11 @@ def _run_stages(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> int
         lifecycle["phase"] = "artifact_coverage"
         artifact_result = _run_readonly_review_stage(
             source_project=project_dir,
-            stage_dir=output_dir / "coverage" / artifact_lane,
+            stage_dir=output_dir / "coverage" / "artifact_coverage",
             stage="coverage",
-            lane=artifact_lane,
+            lane="artifact_coverage",
             packet=artifact_packet,
-            prompt_path=artifact_prompt,
+            prompt_path=PROMPTS["artifact_coverage"],
             output_type=StageReviewReport,
             model=arguments.model,
             reasoning_effort=arguments.reasoning_effort,
@@ -3367,23 +3243,9 @@ def _run_stages(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> int
         )
         stage_summaries.append(consolidation["summary"])
 
-        if arguments.experimental_guided_application:
-            experimental_plan = _experimental_guided_plan(
-                consolidation["review_index"]
-            )
-            _write_json(
-                output_dir / "consolidation" / "planning" /
-                "experimental_validated_plan.json",
-                experimental_plan,
-            )
-            consolidation["plan"] = experimental_plan
-
         collection_summary = {
             "schema": "verified_ida.final_review_collection_summary.v1",
             "status": "completed",
-            "system_guided_artifact": bool(arguments.system_guided_artifact),
-            "guided_gap_ids": list(arguments.guided_gap_id),
-            "guided_system_gap_limit": arguments.guided_system_gap_limit,
             "claim_finding_counts": {
                 str(report.get("lane") or "unknown"): len(
                     list(report.get("findings") or [])

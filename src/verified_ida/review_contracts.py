@@ -41,6 +41,15 @@ class GlobalReviewTarget(_ReviewTargetBase):
     address: ReviewAddress
 
 
+class ComponentRecoveryReviewTarget(_ReviewTargetBase):
+    """One exact parent byte range and the recovered-artifact analysis it requires."""
+
+    kind: Literal["component_recovery"]
+    address: ReviewAddress
+    size: int = Field(gt=0, le=64 * 1024 * 1024)
+    analysis_objective: str = Field(min_length=1)
+
+
 class NamedTypeReviewTarget(_ReviewTargetBase):
     kind: Literal["named_type"]
     name: str
@@ -69,11 +78,26 @@ class LocalVariableReviewTarget(_ReviewTargetBase):
         return self
 
 
+# Reconciliation can enforce these existing artifact targets. Child-recovery
+# waves belong to independent review and must not leak into its sibling policy.
+ReconciliationTarget = Annotated[
+    Union[
+        FunctionReviewTarget,
+        AddressReviewTarget,
+        GlobalReviewTarget,
+        NamedTypeReviewTarget,
+        RelationshipReviewTarget,
+        LocalVariableReviewTarget,
+    ],
+    Field(discriminator="kind"),
+]
+
 ReviewTarget = Annotated[
     Union[
         FunctionReviewTarget,
         AddressReviewTarget,
         GlobalReviewTarget,
+        ComponentRecoveryReviewTarget,
         NamedTypeReviewTarget,
         RelationshipReviewTarget,
         LocalVariableReviewTarget,
@@ -151,7 +175,7 @@ class SystemModelReport(BaseModel):
 class ReconciliationFinding(ReviewFinding):
     """One bounded exact finding in a finite reconciliation campaign."""
 
-    targets: list[ReviewTarget] = Field(
+    targets: list[ReconciliationTarget] = Field(
         min_length=1,
         max_length=RECONCILIATION_MAX_TARGETS_PER_FINDING,
     )

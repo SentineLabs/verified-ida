@@ -1,11 +1,17 @@
-# Using Verified IDA
+# User guide
 
-Start with the [README](../README.md). Use a dedicated static-analysis host,
-keep samples and results outside the source checkout, and read the
-[security boundary](../SECURITY.md). IDA, its license, and API access are external
-requirements. The repository does not contain malware or an IDB.
+## Requirements and installation
 
-## Install an extracted package
+Read [Security](../SECURITY.md) before supplying samples. It explains where to
+run the harness, what reaches the model provider, and how workers are isolated.
+
+The supported environment is Linux with Python 3.10 or later, IDA Pro 9.3 with
+Hex-Rays, and working `unshare`, `bwrap`, GNU `timeout`, and `libseccomp.so.2`.
+The restricted extraction environment requires Linux. You supply the IDA license
+and model API access.
+
+Extract the source package with a tool that preserves Unix executable
+permissions, such as `unzip`:
 
 ```sh
 unzip verified-ida-harness-0.2.0a11-source.zip
@@ -19,27 +25,27 @@ verified-ida --help
 export IDA_PATH=/opt/ida-pro-9.3
 ```
 
-Use an extractor that preserves Unix executable permissions. Python ZIP
-extraction does not restore them. The supported installation is editable source,
-not a wheel detached from its worker scripts, prompts, and schemas. The pinned
-reference dependencies include Agents SDK 0.20.0 and OpenAI 2.54.0; changing the
-runner or versions requires new validation.
+Keep the editable source installation intact: workers, prompts, and schemas are
+runtime dependencies. Installing a wheel without that source tree is unsupported.
+The pinned environment uses Agents SDK 0.20.0 and OpenAI 2.54.0; changed SDK or
+IDA versions need new validation.
 
-Supply `OPENAI_API_KEY` through the process environment for a model run. The
-controller sends code evidence to the configured provider; network-isolated IDA
-does not mean an entirely offline investigation. Assess that data transfer before
-processing confidential samples. API availability varies; select a model your
-account can access with `--model` rather than assuming the reference model is
-available to everyone.
+Supply `OPENAI_API_KEY` through the environment and select an accessible model
+with `--model`. [.env.example](../.env.example) documents the variables;
+the harness does not load `.env` automatically.
 
-## Input and first investigation
+### Check your installation
 
-Use the sample and its own clean IDB. The host checks IDA's original loader hash;
-a mismatched or missing hash blocks startup. The clean input is copied into a
-new project and is not the mutable analysis database.
+The [scripted installation check](../examples/verified-edit/README.md) exercises
+real IDA edits, feedback, and persistence using a harmless C program. It requires
+no model or API key.
 
-You can prepare an IDB through IDA's normal analysis or the included no-network
-helper. For untrusted samples, do this only on the isolated analysis host:
+## Investigate
+
+Start with a sample and its clean IDB. The host checks that IDA's loader-recorded
+input hash matches the sample, then copies the inputs into a new project.
+
+Prepare the IDB with IDA or the included no-network helper:
 
 ```sh
 scripts/run_ida_script_no_network.sh \
@@ -48,7 +54,7 @@ scripts/run_ida_script_no_network.sh \
   --save-as /analysis/input/clean.i64
 ```
 
-The host performs static inspection; it does not launch the sample.
+Start the investigation:
 
 ```sh
 verified-ida analyze \
@@ -58,12 +64,12 @@ verified-ida analyze \
   --model YOUR_AVAILABLE_MODEL
 ```
 
-The initial packet exposes measured binary metadata and query capabilities.
-The model plans its investigation, inspects evidence, applies supported changes,
-and maintains the notebook. It chooses its route; there is no required root-first
-or exhaustive whole-function traversal in the default profile.
+The model receives binary metadata and query capabilities, plans its route,
+inspects code, and applies supported findings. The default profile lets it
+choose which functions and components to pursue. The notebook tracks that work.
 
-## Resume, budgets, and status
+To resume, use the same project and retain its model, reasoning, profile, and
+budget settings:
 
 ```sh
 verified-ida analyze \
@@ -71,23 +77,9 @@ verified-ida analyze \
   --model YOUR_AVAILABLE_MODEL
 ```
 
-Keep the original model, reasoning, and profile settings when resuming. Do not
-reset usage or edit the SQLite ledger to bypass a completion check.
+## Review
 
-Use command-specific `--help` to inspect current ceilings. Independent review
-has its own aggregate budget, separate from primary investigation: defaults are
-250M recorded tokens, 2,500 requests, and four active hours. Its collection,
-application and finalization share that allowance. Model-response boundaries
-enforce these limits, so an in-flight response can cross a token ceiling. Use an
-outer process/job timeout if you require an exact wall-clock cutoff.
-
-Token totals include cached context; they are not a direct measure of internal
-reasoning or a price estimate. Budget exhaustion is not completion. A nonzero
-exit requires examining `summary.json`; an analytically incomplete review can
-exit with code 2 without a crashed worker. Check its findings and mechanical
-failure fields rather than interpreting every incomplete result as an outage.
-
-## Independent review
+Independent review is a separate command:
 
 ```sh
 verified-ida review \
@@ -96,10 +88,11 @@ verified-ida review \
   --model YOUR_AVAILABLE_MODEL
 ```
 
-This command collects findings on disposable databases, then resumes the saved
-investigator in a separate review candidate. Application processes one finding
-at a time, preserves decisions and journal updates, and checks persistence.
-The original primary databases remain intact.
+The [review sequence](standard.md#independent-review-and-closure) collects
+findings on disposable databases and returns them to the saved investigator.
+Reviewed IDBs are under `/analysis/output/review/project/`; the primary project
+remains intact. Run review explicitly after investigation; `analyze` does not
+automatically run this command.
 
 Resume stopped application without repeating collection:
 
@@ -111,65 +104,104 @@ verified-ida review \
   --resume-application
 ```
 
-Earlier attempts, edits, dispositions, and aggregate usage are retained. For a
-legacy pre-a10 review, preserve a snapshot before using
-`--import-legacy-baseline`; the host checks the original operation prefix and
-frozen source identity rather than guessing a missing baseline.
+The saved findings, prior edits, decisions, notebook, and usage are retained.
+If application has resolved the required findings but the final completion
+checks were interrupted, retry finalization:
 
-`finalize-review` retries closure after mechanical issues have been resolved.
-`replay-review-wave` is a separate, explicitly budgeted replay experiment.
-Neither is a substitute for resuming outstanding findings. Use their `--help`
-for required project and artifact inputs.
+```sh
+verified-ida finalize-review \
+  --run-dir /analysis/output/review \
+  --model YOUR_AVAILABLE_MODEL \
+  --stage-name finalization-01
+```
 
-The experimental `--coverage-reconciliation` analysis option adds a separate
-pre-completion, fixed-scope review. It is not enabled merely by using the
-independent `review` command. See [the standard](standard.md).
+Use a new stage name for each retry and retain the campaign's model, reasoning,
+and budget settings. Finalization checks persistence and agreement between
+accepted review conclusions and the annotations. It can return a reported
+conflict for a targeted correction; the [specification](standard.md#independent-review-and-closure)
+defines that scope. Use `--resume-application` when findings remain open.
 
-## Read the results
+### Optional: enforce a selected investigation scope
 
-| Output | What to inspect |
+Add `--coverage-reconciliation` to `analyze` to run an additional review after
+provisional completion. It freezes a set of findings and returns them to the
+investigator. A selected call-flow gap can require downstream inspection and
+revalidation of the parent function before closure.
+
+This experimental policy is disabled by default and persists across resumption.
+Its [scope and limits](standard.md#components-and-enforceable-scope) differ from
+independent review; it does not require every function to be annotated.
+
+## Budgets and status
+
+Inspect command-specific `--help` before starting a run. Independent review has
+a separate aggregate allowance from the primary investigation: 250M recorded
+tokens, 2,500 requests, and four active hours by default, shared across review
+collection, application, and finalization.
+
+Limits are checked at model-response boundaries; an in-flight response can
+cross a token ceiling. Use an outer job timeout for an exact wall-clock cutoff.
+Token totals include cached context and should not be read as a price estimate.
+Resumption retains recorded usage.
+
+Read `run_summary.json` for a primary investigation and the review directory's
+`summary.json` for independent review. Check completion status, unresolved
+findings, mechanical failures, and usage. Exit code 2 can indicate an
+analytically incomplete review, including one awaiting an unavailable payload.
+It does not necessarily indicate a worker crash.
+
+## Inspect and share results
+
+The investigation project contains:
+
+| Output | Contents |
 | --- | --- |
-| `components/<id>/` | Canonical sample copies and annotated databases |
-| `verified_ida.sqlite` | Exact operations, receipts, inspections, revisions, failures and decisions |
-| `reversing_log.md` | Current understanding, component relationships, uncertainty and journal |
-| `observable_tool_trace.jsonl` | Tool requests, results and model-visible messages |
-| `walkthrough.md` | Readable observable-event overview, not private reasoning |
-| `summary.json` | Status, usage, checkpoints and unresolved work |
+| `components/<id>/` | Input copies and annotated IDBs for each binary |
+| `verified_ida.sqlite` | Inspections, operations, receipts, checkpoints, and tracked investigation work |
+| `model_session.sqlite` | Saved model conversation used for resumption |
+| `reversing_log.md` | Current project state and investigation journal |
+| `observable_tool_trace.jsonl` | Observable tool requests, results, and messages |
+| `walkthrough.md` | Readable account of the recorded events |
 
-Review also retains application plans, per-finding outcomes and prior attempts
-beneath its run directory. Keep the whole project when transferring provenance;
-an IDB alone does not contain the complete operational history.
+Independent review keeps its working copy under `project/`. Its findings,
+decisions, and consistency assessments are in
+`review/application/dispositions.json`, relative to the review run directory.
+That record links to the operation IDs in the copied project's SQLite ledger.
+Stage traces, plans, and previous attempts are retained alongside it.
 
-Inspect the correct component and final review candidate. A successful mutation
-receipt does not certify semantic accuracy, and an accepted review finding does
-not establish whole-program completeness.
+Share the complete investigation or review directory when its history matters.
+An IDB contains the annotations but omits the operation ledger, notebook, and
+review decisions. Apply the [same handling precautions](../SECURITY.md) to IDBs
+as to their input samples.
 
-## Export annotations safely
+### Export annotations
 
-Stop active writers before exporting a completed packed IDB. Use distinct new
-output paths, never the source IDB or existing project files:
+Stop active writers and choose new output paths distinct from the source and
+existing project files. The working IDB retains the input IDB's filename
+(`clean.i64` in this example):
 
 ```sh
 python scripts/export_verified_ida_annotations_safely.py \
-  --idb /analysis/output/review/project/components/root/sample.i64 \
+  --idb /analysis/output/review/project/components/root/clean.i64 \
   --output /analysis/exports/annotations.json \
   --provenance /analysis/exports/export.json
 ```
 
-This helper measures semantic state from disposable snapshots before and after
-export, checks source byte identity, and records provenance. Failed exports
-retain diagnostics rather than replacing an earlier successful export. The
-standalone semantic worker uses the same exporter as normal checkpoints.
-Like any read/export utility, this is not a semantic judgment of the annotations.
+This helper exports through disposable snapshots, compares semantic state,
+checks source byte identity, and records the result. Failed exports retain
+diagnostics while preserving earlier successful output.
 
-## Build a source archive
+### Package the source
 
 ```sh
 python scripts/package_source.py --output-dir /analysis/packages
 ```
 
-The package inventory is explicit in `scripts/release_files.json`. The builder
-requires a clean Git checkout, includes only those files, preserves launcher
-permissions, and generates a per-file manifest plus an archive checksum. A
-checksum detects transfer changes; it does not authenticate the publisher.
-The archive excludes tests, private research, malware, IDBs and credentials.
+The builder requires a clean Git checkout and uses the explicit inventory in
+`scripts/release_files.json`. It preserves launcher permissions and generates
+a per-file manifest and archive checksum. The archive contains source and
+documentation; samples, results, credentials, and private research stay outside
+it. A checksum detects transfer changes but does not authenticate the publisher.
+Commit the reviewed source before building an archive; do not use an older ZIP
+as a substitute for uncommitted changes. The archive includes the project's
+[MIT license](../LICENSE).

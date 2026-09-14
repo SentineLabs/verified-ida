@@ -13,11 +13,12 @@ from typing import Any
 
 from verified_ida.commands.analyze import _session, _session_identity
 from verified_ida.commands.review import (
-    _run_application_reconciliation,
+    _run_application_closure,
     _session_message_count,
     _write_json,
 )
 from verified_ida.final_review import FinalReviewError, project_component_hashes, review_completion_blockers
+from verified_ida.review_application_state import restore_application_ledger
 from verified_ida.runtime import VerifiedIdaRuntime
 from verified_ida.review_budget import add_review_budget_arguments, run_budgeted_review
 from verified_ida.safety_budget import SafetyBudgetExceeded
@@ -120,8 +121,15 @@ def _publish_summary(arguments: argparse.Namespace, summary: dict[str, Any]) -> 
         current = _load_json(path)
         current.setdefault("pre_finalization_status", current.get("status"))
         current.update(status=summary["status"], phase="finalization",
-                       completion=summary["completion"], finalization=summary)
+                       completion=summary["completion"], finalization=summary,
+                       analytical_completion=summary["status"] == "completed")
         _write_json(path, current)
+    project_path = run_dir / "project" / "run_summary.json"
+    if project_path.is_file():
+        project_summary = _load_json(project_path)
+        project_summary.update(status=summary["status"], completion=summary["completion"],
+                               final_review=summary, analytical_completion=summary["status"] == "completed")
+        _write_json(project_path, project_summary)
 
 
 def _finalize(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> dict[str, Any]:
@@ -137,11 +145,6 @@ def _finalize(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> dict[
     rows = list(dispositions.get("dispositions") or [])
     application_dir = disposition_path.parent
     plan_path = application_dir / "execution_plan.json"
-    if not plan_path.exists():
-        # Older runs recorded the effective plan in the collection directory.
-        planning = run_dir / "review" / "consolidation" / "planning"
-        experimental = planning / "experimental_validated_plan.json"
-        plan_path = experimental if experimental.exists() else planning / "validated_plan.json"
     plan = _load_json(plan_path)
     ledger = SimpleNamespace(
         dispositions={str(row["finding_id"]): dict(row) for row in rows}
@@ -152,6 +155,7 @@ def _finalize(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> dict[
     findings = {str(row["finding_id"]): row for row in finding_rows}
     scheduled = {str(fid) for wave in plan["waves"] for fid in wave["source_finding_ids"]}
     scheduled.update(str(row["follow_up"]["finding_id"]) for row in rows if row.get("follow_up"))
+    scheduled.update(key for key, row in findings.items() if row.get("closure_mismatch"))
     if (len(ledger.dispositions) != len(rows) or len(findings) != len(finding_rows)
             or set(findings) != scheduled or dispositions.get("finding_count") != len(findings)
             or dispositions.get("disposition_count") != len(rows)):
@@ -183,6 +187,8 @@ def _finalize(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> dict[
                     str(row["operation_id"]) for row in mechanical_before
                 )
             )
+        ledger = restore_application_ledger(application_dir, runtime=runtime, model=arguments.model,
+                                            reasoning_effort=arguments.reasoning_effort)
         identity = _session_identity(project)
         session_id = str(identity["session_id"])
         session_state = {
@@ -194,7 +200,7 @@ def _finalize(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> dict[
             "resumed_original_investigation": True,
             "finalization_retry": True,
         }
-        reconciliation = _run_application_reconciliation(
+        reconciliation = _run_application_closure(
             runtime=runtime,
             stage_dir=stage_dir,
             ledger=ledger,
@@ -202,7 +208,7 @@ def _finalize(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> dict[
             reasoning_effort=arguments.reasoning_effort,
             application_session=_session(project),
             session_state=session_state,
-            runaway_max_turns=arguments.runaway_max_turns,
+            reconciliation_max_turns=arguments.runaway_max_turns,
         )
         source_unchanged_after, _source_project = _source_is_unchanged(project)
         completion = runtime.completion_status()
@@ -218,10 +224,8 @@ def _finalize(arguments: argparse.Namespace, lifecycle: dict[str, Any]) -> dict[
             "project_dir": str(project),
             "source_project": source_project,
             "source_project_unchanged": source_unchanged_after,
-            "disposition_count": len(rows),
-            "open_finding_count": len(
-                list(dispositions.get("open_finding_ids") or [])
-            ),
+            "disposition_count": len(ledger.dispositions),
+            "open_finding_count": len(set(ledger.findings) - set(ledger.dispositions)),
             "mechanical_failure_count": len(
                 runtime.journal.mechanical_issues()
             ),

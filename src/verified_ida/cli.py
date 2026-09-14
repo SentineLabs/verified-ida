@@ -16,10 +16,6 @@ COMMANDS = {
         "verified_ida.commands.review",
         "Run independent final review and verified application.",
     ),
-    "replay-review-wave": (
-        "verified_ida.commands.replay_review_wave",
-        "Replay one finding from a frozen final-review plan.",
-    ),
     "finalize-review": (
         "verified_ida.commands.finalize_review",
         "Retry closure finalization after all review findings are resolved.",

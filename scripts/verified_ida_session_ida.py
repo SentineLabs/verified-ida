@@ -31,6 +31,7 @@ from ida_reader import load_binary
 from ida_structural_queries import execute_task
 from export_verified_ida_semantic_state import export_semantic_state
 from verified_ida.contracts import validate_operation
+from verified_ida.model_tools import READ_ONLY_SESSION_QUERIES
 
 
 def parse_args(argv):
@@ -66,6 +67,10 @@ def _handle(request, *, input_path, input_binary_path, operation_registry):
         task = params.get("task")
         if not isinstance(task, dict):
             raise ValueError("query requires one task object")
+        # Validate the exact dispatch key before aliases or handler options are
+        # interpreted. Instruction creation belongs to mutation, never query.
+        if task.get("task_type") not in READ_ONLY_SESSION_QUERIES:
+            raise ValueError("unsupported read-only session query: %s" % task.get("task_type"))
         result = execute_task(task, input_file_path=input_binary_path)
         return {"ok": True, "result": result}
     if method == "apply":

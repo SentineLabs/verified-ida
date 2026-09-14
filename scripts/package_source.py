@@ -43,7 +43,7 @@ def build(output_dir):
         path = ROOT / relative
         if any(ROOT.joinpath(*relative.parts[:i]).is_symlink() for i in range(1, len(relative.parts) + 1)):
             raise RuntimeError("Symlink in source inventory: " + name)
-        if relative.suffix not in {".py", ".md", ".json", ".toml", ".sh", ".sb", ".txt", ".c"} and name not in {".gitignore", ".env.example"}:
+        if relative.suffix not in {".py", ".md", ".json", ".toml", ".sh", ".sb", ".txt", ".c"} and name not in {".gitignore", ".env.example", "LICENSE"}:
             raise RuntimeError("Unapproved source file: " + name)
         data = path.read_bytes()
         data.decode("utf-8")

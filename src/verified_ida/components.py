@@ -21,6 +21,25 @@ from .journal import JournalError, stable_id
 from .child_environment import child_environment
 
 
+def retained_artifact(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Read back a registered artifact without treating it as executable code."""
+    path = Path(str(row.get("artifact_path") or ""))
+    expected = str(row.get("artifact_sha256") or "")
+    if not expected or not path.is_file():
+        raise JournalError("Recovered artifact bytes are missing")
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+            size += len(block)
+    if digest.hexdigest() != expected:
+        raise JournalError("Recovered artifact bytes no longer match their recorded hash")
+    return {"extraction_id": row["extraction_id"],
+            "parent_component_id": row["parent_component_id"],
+            "artifact_sha256": expected, "size": size}
+
+
 def _bounded_component_emulator(
     source: bytes, extraction: Mapping[str, Any]
 ) -> bytes:
@@ -58,6 +77,18 @@ def _bounded_component_emulator(
         "readback": [{"address": output_address, "size": output_size}],
     }
     result = emulate_x86(request, code)
+    if result.get("ok") is not True or result.get("stopped") != "completed":
+        raise ExtractionFailure(
+            "bounded_emulation",
+            "decoder did not reach its configured endpoint; output is not accepted",
+            stopped=result.get("stopped"),
+            error=result.get("error"),
+            instruction_count=result.get("executed_instruction_count"),
+            instruction_limit=result.get("instruction_limit"),
+            endpoint=result.get("end"),
+            registers=result.get("registers"),
+            recovery="Inspect the decoder boundary, mappings and registers before retrying; partial output is not a completed extraction.",
+        )
     readback = result.get("readback") or []
     if not readback:
         raise ExtractionFailure(
@@ -170,6 +201,14 @@ class ComponentRecoveryService:
                 if evidence is None or evidence["component_id"] != parent["component_id"]:
                     raise JournalError("Extraction evidence must belong to the parent IDB")
         extraction_id = stable_id("extraction", request["request_id"], request)
+        existing = self.runtime.journal.extraction(extraction_id)
+        if existing and existing.get("status") == "accepted":
+            artifact = retained_artifact(existing)
+            return {"extraction_id": extraction_id, "status": "accepted",
+                    "child_component_id": existing["child_component_id"],
+                    "artifact_sha256": existing["artifact_sha256"],
+                    "artifact": artifact,
+                    "reused_existing": True}
         try:
             artifact, result = execute_semantic_extraction(
                 parent_path=Path(parent["binary_path"]),
@@ -284,6 +323,18 @@ class ComponentRecoveryService:
             "evidence_refs": list(evidence_refs),
             "host_validation": row["validation"],
         }
+        if row.get("status") == "accepted":
+            if decision != "accept":
+                raise JournalError("An accepted artifact cannot be retracted through extraction disposition")
+            artifact = retained_artifact(row)
+            if not row.get("child_component_id"):
+                return {"review": row["validation"], "extraction": row,
+                        "artifact": artifact, "reused_existing": True}
+            component = self.runtime.journal.component(str(row.get("child_component_id") or ""))
+            if not component or component["binary_sha256"] != row.get("artifact_sha256"):
+                raise JournalError("Accepted extraction lost its registered child identity")
+            return {"review": row["validation"], "component": component,
+                    "reused_existing": True}
         if decision == "revise":
             if not next_request:
                 raise JournalError("A revise decision requires next_request")
@@ -311,9 +362,28 @@ class ComponentRecoveryService:
             return {"review": review, "extraction": updated}
         artifact_path = Path(str(row.get("artifact_path") or ""))
         validation = (row["validation"].get("structural_validation") or {})
+        if not validation:
+            raise JournalError("Acceptance requires successful artifact validation")
+        artifact = retained_artifact(row)
         if not validation.get("loadable"):
-            raise JournalError("Accepted artifact is not loadable as a separate IDB")
+            if validation.get("valid") is not True:
+                raise JournalError("Acceptance requires successful artifact validation")
+            updated = self.runtime.journal.record_extraction(
+                extraction_id=extraction_id,
+                parent_component_id=row["parent_component_id"],
+                request=row["request"], status="accepted", validation=review,
+                artifact_sha256=row["artifact_sha256"], artifact_path=artifact_path,
+            )
+            return {"review": review, "extraction": updated, "artifact": artifact,
+                    "analysis_context": "parent_owned_data",
+                    "instruction": "Retain findings against the parent IDB and notebook, citing this extraction. "
+                                   "Acceptance proves artifact retention, not analytical completeness; no child IDB is required for data."}
         component_id = "component-%s" % str(row["artifact_sha256"])[:16]
+        if self.runtime.journal.component(component_id) is not None:
+            raise JournalError(
+                "This artifact already has a child IDB; reuse the accepted extraction "
+                "instead of preparing and overwriting its analysis"
+            )
         component_dir = self.runtime.workspace / "components" / component_id
         component_dir.mkdir(parents=True, exist_ok=True)
         child_binary = component_dir / artifact_path.name
@@ -350,7 +420,7 @@ class ComponentRecoveryService:
 
     def _prepare_idb(self, binary_path: Path, idb_path: Path) -> Mapping[str, Any]:
         script_root = Path(__file__).resolve().parents[2] / "scripts"
-        order_path = idb_path.with_name("analysis_order.json")
+        order_path = idb_path.with_name("preparation.json")
         log_path = idb_path.with_name("prepare_analysis.ida.log")
         command = [
             str(script_root / "run_ida_script_no_network.sh"),
@@ -358,8 +428,6 @@ class ComponentRecoveryService:
             str(log_path),
             str(binary_path),
             str(script_root / "prepare_analysis.py"),
-            "--max",
-            "5000",
             "--save-as",
             str(idb_path),
             "--output",

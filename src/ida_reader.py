@@ -237,10 +237,8 @@ def get_function_summary(func_ea: int) -> dict:
     except Exception:
         bb_count = 1
 
-    # Library function heuristic
-    is_library = bool(func.flags & idaapi.FUNC_LIB) or (
-        name.startswith("_") and not name.startswith("__")
-    )
+    # Only IDA's native library flag is an asserted classification.
+    is_library = bool(func.flags & idaapi.FUNC_LIB)
 
     # Call graph: callers (xrefs TO this function)
     callers = []

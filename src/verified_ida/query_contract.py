@@ -57,7 +57,7 @@ QUERY_FAMILIES: dict[str, dict[str, Any]] = {
         "default_order": "name",
         "orders": ["name", "kind"],
         "filters": {
-            "kind": "all, struct, or enum",
+            "kind": "all, struct, union, enum, or typedef",
             "name_prefix": "case-sensitive local-type name prefix",
         },
     },

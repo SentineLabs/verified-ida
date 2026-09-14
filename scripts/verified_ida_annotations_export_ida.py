@@ -582,7 +582,7 @@ def export_local_named_types():
         except Exception:
             continue
         name = local_type_name(tif, ordinal)
-        if not name or name.startswith("__") or name.startswith("#"):
+        if not name or name.startswith("#"):
             continue
         if safe_call(False, tif.is_udt):
             udt = ida_typeinf.udt_type_data_t()
@@ -702,7 +702,7 @@ def export_structs():
     for item in struct_db_items + (local_types.get("structs") or []):
         name = clean_text(item.get("name"))
         if name:
-            by_name.setdefault(name.lower(), item)
+            by_name.setdefault(name, item)
     return {
         "available": ida_struct is not None or local_types.get("available"),
         "items": sorted(by_name.values(), key=lambda item: clean_text(item.get("name")).lower()),
@@ -766,7 +766,7 @@ def export_enums():
     for item in enum_db_items + (local_types.get("enums") or []):
         name = clean_text(item.get("name"))
         if name:
-            by_name.setdefault(name.lower(), item)
+            by_name.setdefault(name, item)
     return {
         "available": ida_enum is not None or local_types.get("available"),
         "items": sorted(by_name.values(), key=lambda item: clean_text(item.get("name")).lower()),
